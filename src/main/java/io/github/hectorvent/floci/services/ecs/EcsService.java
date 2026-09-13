@@ -1483,7 +1483,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         }
 
         String deploymentId = deploymentId(svc);
-        boolean converged = svc.getRunningCount() >= svc.getDesiredCount();
+        boolean gated = gatesOnTargetHealth(svc);
+        // A load-balanced deployment completes only once the reconciler has seen every task's
+        // targets healthy, and stays completed; see reconcileService.
+        boolean converged = gated
+                ? deploymentId.equals(svc.getLastCompletedDeploymentId())
+                : svc.getRunningCount() >= svc.getDesiredCount();
+        String pending = gated && !converged ? svc.getPendingTargetReason() : null;
 
         Deployment d = new Deployment();
         d.setId(deploymentId);
@@ -1495,7 +1501,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         d.setFailedTasks(0);
         d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
         d.setRolloutStateReason("ECS deployment " + deploymentId
-                + (converged ? " completed." : " in progress."));
+                + (converged ? " completed." : pending != null ? " in progress: " + pending + "." : " in progress."));
         d.setLaunchType(svc.getLaunchType());
         // The deployment's own start time, not the service's: a task-definition change mints a
         // new deployment id, so reporting service creation here would contradict it. Older
@@ -1568,16 +1574,31 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
 
         Instant now = Instant.now();
 
+        // A deployment still rolling out when a newer one starts is stopped, as on AWS.
+        serviceDeployments.values().stream()
+                .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
+                .filter(d -> "IN_PROGRESS".equals(d.getStatus()))
+                .filter(d -> !deploymentArn.equals(d.getServiceDeploymentArn()))
+                .forEach(d -> {
+                    d.setStatus("STOPPED");
+                    d.setUpdatedAt(now);
+                    d.setFinishedAt(now);
+                });
+
+        // A load-balanced deployment stays IN_PROGRESS until its targets are healthy
+        // (completeServiceDeployment); every other deployment is reported as it always was.
+        boolean gated = gatesOnTargetHealth(svc);
+
         ServiceDeployment deployment = new ServiceDeployment();
         deployment.setServiceDeploymentArn(deploymentArn);
         deployment.setServiceArn(svc.getServiceArn());
         deployment.setClusterArn(svc.getClusterArn());
         deployment.setTaskDefinition(taskDefinition);
-        deployment.setStatus("SUCCESSFUL");
+        deployment.setStatus(gated ? "IN_PROGRESS" : "SUCCESSFUL");
         deployment.setCreatedAt(now);
         deployment.setUpdatedAt(now);
         deployment.setStartedAt(now);
-        deployment.setFinishedAt(now);
+        deployment.setFinishedAt(gated ? null : now);
         deployment.setTargetServiceRevisionArn(revisionArn);
         deployment.setSourceServiceRevisionArns(sourceRevisionArns);
         serviceDeployments.put(deploymentArn, deployment);
@@ -1941,6 +1962,32 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 && cluster.getClusterArn().equals(task.getClusterArn());
     }
 
+    /**
+     * Whether the service's deployments wait for target health. Only a load-balanced service in
+     * docker mode: mock-mode tasks run no containers and never register a target, so gating them
+     * would hold every deployment open forever.
+     */
+    private boolean gatesOnTargetHealth(EcsServiceModel svc) {
+        return dockerMode && svc.getLoadBalancers() != null && !svc.getLoadBalancers().isEmpty();
+    }
+
+    /** Marks the service's current deployment SUCCESSFUL once its tasks are healthy behind the load balancer. */
+    private void completeServiceDeployment(EcsServiceModel svc) {
+        String deploymentId = deploymentId(svc);
+        int slash = deploymentId.lastIndexOf('/');
+        String bareId = slash >= 0 ? deploymentId.substring(slash + 1) : deploymentId;
+        Instant now = Instant.now();
+        serviceDeployments.values().stream()
+                .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
+                .filter(d -> "IN_PROGRESS".equals(d.getStatus()))
+                .filter(d -> d.getServiceDeploymentArn() != null && d.getServiceDeploymentArn().endsWith("/" + bareId))
+                .forEach(d -> {
+                    d.setStatus("SUCCESSFUL");
+                    d.setUpdatedAt(now);
+                    d.setFinishedAt(now);
+                });
+    }
+
     private void reconcileService(String key, EcsServiceModel svc) {
         if (!"ACTIVE".equals(svc.getStatus())) {
             return;
@@ -1969,20 +2016,42 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
 
         svc.setRunningCount((int) running);
 
-        if (eventPublisher != null) {
-            String deploymentId = currentDeploymentId;
-            boolean converged = current >= svc.getDesiredCount();
-            if (converged) {
-                if (!deploymentId.equals(svc.getLastCompletedDeploymentId())) {
-                    svc.setLastCompletedDeploymentId(deploymentId);
-                    services.put(key, svc);
+        String deploymentId = currentDeploymentId;
+        boolean countsMet = current >= svc.getDesiredCount();
+        boolean alreadyCompleted = deploymentId.equals(svc.getLastCompletedDeploymentId());
+        boolean converged;
+        if (gatesOnTargetHealth(svc)) {
+            // AWS counts a load-balanced task only once its target group health check reports it
+            // healthy, so the deployment reaches steady state only when every current task's
+            // target in every target group is healthy. Once completed it stays completed.
+            String pending = null;
+            if (countsMet && !alreadyCompleted) {
+                pending = runningTasks.stream()
+                        .filter(t -> !staleTasks.contains(t))
+                        .map(t -> lbRegistrar.pendingTargetReason(t, svc, region))
+                        .flatMap(java.util.Optional::stream)
+                        .findFirst()
+                        .orElse(null);
+            }
+            svc.setPendingTargetReason(alreadyCompleted || !countsMet ? null : pending);
+            converged = alreadyCompleted || (countsMet && pending == null);
+        } else {
+            converged = countsMet;
+        }
+
+        if (converged) {
+            if (!alreadyCompleted) {
+                svc.setLastCompletedDeploymentId(deploymentId);
+                services.put(key, svc);
+                completeServiceDeployment(svc);
+                if (eventPublisher != null) {
                     eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_COMPLETED",
                             "ECS deployment " + deploymentId + " completed.", region);
                 }
-            } else if (inProgressEmitted.add(deploymentId)) {
-                eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_IN_PROGRESS",
-                        "ECS deployment " + deploymentId + " in progress.", region);
             }
+        } else if (eventPublisher != null && inProgressEmitted.add(deploymentId)) {
+            eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_IN_PROGRESS",
+                    "ECS deployment " + deploymentId + " in progress.", region);
         }
 
         if (current < svc.getDesiredCount()) {
