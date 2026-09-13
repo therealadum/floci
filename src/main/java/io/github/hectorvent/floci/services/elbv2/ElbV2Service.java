@@ -793,7 +793,7 @@ public class ElbV2Service implements ResourceProvider {
                 return th;
             }
             int port = ElbV2HealthChecker.effectivePort(t, tg);
-            th.setHealthCheckPort(String.valueOf(port));
+            th.setHealthCheckPort(String.valueOf(ElbV2HealthChecker.healthCheckPort(port, tg)));
             if (hasFilterTargets && !isRegisteredTarget(tg, t, port)) {
                 th.setState("unused");
                 th.setReason("Target.NotRegistered");

@@ -50,6 +50,23 @@ public class ElbV2HealthChecker implements Resettable {
         return 80;
     }
 
+    /**
+     * Port the health check probes. A numeric {@code HealthCheckPort} applies to every target of the
+     * group; {@code traffic-port} (or unset) probes the target's traffic port. Target health stays
+     * keyed on the traffic port either way.
+     */
+    public static int healthCheckPort(int trafficPort, TargetGroup tg) {
+        String configured = tg.getHealthCheckPort();
+        if (configured == null || configured.isBlank() || "traffic-port".equals(configured)) {
+            return trafficPort;
+        }
+        try {
+            return Integer.parseInt(configured.trim());
+        } catch (NumberFormatException e) {
+            return trafficPort;
+        }
+    }
+
     public void startMonitoring(TargetGroup tg) {
         if (config.services().elbv2().mock()) {
             return;
@@ -139,12 +156,13 @@ public class ElbV2HealthChecker implements Resettable {
                 continue;
             }
             String targetId = parts[0];
-            int port;
+            int trafficPort;
             try {
-                port = Integer.parseInt(parts[1]);
+                trafficPort = Integer.parseInt(parts[1]);
             } catch (NumberFormatException e) {
                 continue;
             }
+            int port = healthCheckPort(trafficPort, tg);
             String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, targetId);
             String path = tg.getHealthCheckPath() != null ? tg.getHealthCheckPath() : "/";
             String matcher = tg.getMatcher() != null ? tg.getMatcher() : "200";
