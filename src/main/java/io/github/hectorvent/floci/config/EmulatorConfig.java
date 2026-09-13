@@ -1922,6 +1922,12 @@ public interface EmulatorConfig {
         /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
         @WithDefault("30")
         int schemaWorkerShutdownTimeoutSeconds();
+
+        /** When set, Floci uses this URL and skips GraphQL sidecar container management. */
+        Optional<String> graphqlUrl();
+
+        @WithDefault("floci/floci:latest-graphql")
+        String graphqlImage();
     }
 
     interface OamServiceConfig {
