@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
+import io.github.hectorvent.floci.services.ecs.model.ServiceRevisionSummary;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
@@ -1532,13 +1533,40 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         return "ecs-svc/" + Long.toUnsignedString(hash);
     }
 
+    /**
+     * Records the {@code DescribeServiceDeployments} view of the deployment the service has just
+     * entered, together with the service revision that deployment rolls out.
+     *
+     * <p>Both ARNs are keyed on the service's own {@code deployments[].id} rather than a fresh
+     * UUID. Clients correlate the two APIs through that id: terraform-provider-aws' ECS service
+     * waiter reads the primary deployment's {@code ecs-svc/<id>} from {@code DescribeServices},
+     * then accepts a {@code ListServiceDeployments} brief only when its
+     * {@code targetServiceRevisionArn} contains that {@code <id>}. An unrelated random id matches
+     * nothing and leaves the provider polling until its 20-minute timeout on every create and
+     * every task-definition change.
+     */
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
-        String deploymentId = UUID.randomUUID().toString().replace("-", "");
-        String deploymentArn = regionResolver.buildArn("ecs", region,
-                "service-deployment/" + deploymentId);
-        String revisionId = UUID.randomUUID().toString().replace("-", "");
-        String revisionArn = regionResolver.buildArn("ecs", region,
-                "service-revision/" + revisionId);
+        // "ecs-svc/<id>" as DescribeServices reports it; the bare <id> is the ARN's last segment.
+        String deploymentId = deploymentId(svc);
+        int slash = deploymentId.lastIndexOf('/');
+        String bareId = slash >= 0 ? deploymentId.substring(slash + 1) : deploymentId;
+
+        // AWS scopes both resource types by cluster and service:
+        // arn:aws:ecs:<region>:<account>:service-deployment/<cluster>/<service>/<id>
+        String scope = clusterNameFromArn(svc.getClusterArn()) + "/" + svc.getServiceName() + "/" + bareId;
+        String deploymentArn = regionResolver.buildArn("ecs", region, "service-deployment/" + scope);
+        String revisionArn = regionResolver.buildArn("ecs", region, "service-revision/" + scope);
+
+        // Revisions this deployment replaces: the target of the service's most recent deployment.
+        List<String> sourceRevisionArns = serviceDeployments.values().stream()
+                .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
+                .filter(d -> d.getTargetServiceRevisionArn() != null)
+                .filter(d -> !revisionArn.equals(d.getTargetServiceRevisionArn()))
+                .max(Comparator.comparing(ServiceDeployment::getCreatedAt))
+                .map(d -> List.of(d.getTargetServiceRevisionArn()))
+                .orElseGet(List::of);
+
+        Instant now = Instant.now();
 
         ServiceDeployment deployment = new ServiceDeployment();
         deployment.setServiceDeploymentArn(deploymentArn);
@@ -1546,8 +1574,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         deployment.setClusterArn(svc.getClusterArn());
         deployment.setTaskDefinition(taskDefinition);
         deployment.setStatus("SUCCESSFUL");
-        deployment.setCreatedAt(Instant.now());
-        deployment.setUpdatedAt(Instant.now());
+        deployment.setCreatedAt(now);
+        deployment.setUpdatedAt(now);
+        deployment.setStartedAt(now);
+        deployment.setFinishedAt(now);
+        deployment.setTargetServiceRevisionArn(revisionArn);
+        deployment.setSourceServiceRevisionArns(sourceRevisionArns);
         serviceDeployments.put(deploymentArn, deployment);
 
         ServiceRevision revision = new ServiceRevision();
@@ -1556,8 +1588,34 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         revision.setClusterArn(svc.getClusterArn());
         revision.setTaskDefinition(taskDefinition);
         revision.setLaunchType(svc.getLaunchType());
-        revision.setCreatedAt(Instant.now());
+        revision.setCreatedAt(now);
         serviceRevisions.put(revisionArn, revision);
+    }
+
+    /**
+     * The compact {@code ServiceRevisionSummary} that {@code DescribeServiceDeployments} embeds
+     * for a revision. The counts are the owning service's live counts, as on AWS; a revision
+     * whose service is gone reports zeroes rather than being omitted.
+     */
+    public ServiceRevisionSummary serviceRevisionSummary(String revisionArn) {
+        ServiceRevision revision = serviceRevisions.get(revisionArn);
+        EcsServiceModel svc = revision == null ? null : services.values().stream()
+                .filter(s -> revision.getServiceArn().equals(s.getServiceArn()))
+                .findFirst()
+                .orElse(null);
+        if (svc == null) {
+            return new ServiceRevisionSummary(revisionArn, 0, 0, 0);
+        }
+        return new ServiceRevisionSummary(revisionArn, svc.getDesiredCount(),
+                svc.getRunningCount(), svc.getPendingCount());
+    }
+
+    private static String clusterNameFromArn(String clusterArn) {
+        if (clusterArn == null) {
+            return "default";
+        }
+        int slash = clusterArn.lastIndexOf('/');
+        return slash >= 0 ? clusterArn.substring(slash + 1) : clusterArn;
     }
 
     // ── Stub operations ────────────────────────────────────────────────────────
