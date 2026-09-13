@@ -1748,6 +1748,24 @@ public interface EmulatorConfig {
 
         Optional<String> dockerNetwork();
 
+        /**
+         * How the containers of one {@code awsvpc} task are wired to the network.
+         *
+         * <p>{@code shared} (the default) reproduces Fargate and the awsvpc network mode: every
+         * container of a task lives in ONE network namespace, so a sidecar reaches its neighbour
+         * on {@code 127.0.0.1} and the task has a single IP. The first container definition owns
+         * the namespace; the others are created with Docker's {@code container:<id>} network mode.
+         *
+         * <p>{@code per-container} restores the older behaviour, where every container is its own
+         * Docker container with its own IP on the task network and loopback between the containers
+         * of a task does not work.
+         *
+         * <p>Ignored for {@code bridge} and {@code host} task definitions, which do not share a
+         * namespace on AWS either.
+         */
+        @WithDefault("shared")
+        String taskNetworkMode();
+
         @WithDefault("512")
         int defaultMemoryMb();
 
