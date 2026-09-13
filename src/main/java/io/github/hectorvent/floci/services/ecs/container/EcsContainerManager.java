@@ -108,6 +108,10 @@ public class EcsContainerManager {
         // name -> EFS configuration (materialised below as a shared local Docker volume).
         Map<String, String> volumeSourcePaths = new LinkedHashMap<>();
         Map<String, EfsVolumeConfiguration> efsVolumes = new LinkedHashMap<>();
+        // A volume with neither host nor EFS configuration is a task-scoped scratch volume: on
+        // Fargate it is ephemeral storage shared by every container of the task that mounts it,
+        // and removed when the task stops. Locally it is one Docker named volume per task.
+        Map<String, String> taskVolumes = new LinkedHashMap<>();
         if (taskDef.getVolumes() != null) {
             for (Volume v : taskDef.getVolumes()) {
                 if (v.name() == null) {
@@ -117,8 +121,15 @@ public class EcsContainerManager {
                     volumeSourcePaths.put(v.name(), v.hostSourcePath());
                 } else if (v.efs() != null) {
                     efsVolumes.put(v.name(), v.efs());
+                } else {
+                    taskVolumes.put(v.name(), ContainerStorageHelper.dockerName(config, taskVolumeName(taskId, v.name())));
                 }
             }
+        }
+        Map<String, String> taskVolumeLabels = ContainerStorageHelper.resourceIdentityLabels(
+                "ecs", taskId, regionResolver.getAccountId(), region);
+        for (String dockerVolume : taskVolumes.values()) {
+            lifecycleManager.ensureVolume(dockerVolume, taskVolumeLabels);
         }
 
         Map<String, ContainerOverride> overridesByName = overridesByName(containerOverrides);
@@ -225,7 +236,11 @@ public class EcsContainerManager {
                     }
                     String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
                     EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
-                    if (sourcePath != null) {
+                    String taskVolume = taskVolumes.get(mp.sourceVolume());
+                    if (taskVolume != null) {
+                        // Task scratch volume: the same named volume in every container that mounts it.
+                        specBuilder.withNamedVolume(taskVolume, mp.containerPath(), mp.readOnly());
+                    } else if (sourcePath != null) {
                         // Host volume: bind-mount an absolute path on the Docker host.
                         if (mp.readOnly()) {
                             specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
@@ -281,7 +296,23 @@ public class EcsContainerManager {
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
-        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId);
+        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
+                List.copyOf(taskVolumes.values()));
+    }
+
+    /**
+     * The Docker volume that backs one task scratch volume, before any resource namespace is
+     * applied: unique to the task, so two tasks of one service never share scratch storage.
+     */
+    static String taskVolumeName(String taskId, String volumeName) {
+        return "floci-ecs-" + taskId + "-vol-" + volumeName;
+    }
+
+    /** Removes the task's scratch volumes once its containers are gone; data does not outlive the task. */
+    private void removeTaskVolumes(EcsTaskHandle handle) {
+        for (String volume : handle.getVolumeNames()) {
+            lifecycleManager.removeVolume(volume);
+        }
     }
 
     /** The configured value of {@code floci.services.ecs.task-network-mode} that shares a namespace. */
@@ -344,6 +375,7 @@ public class EcsContainerManager {
         }
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        removeTaskVolumes(handle);
     }
 
     /**
@@ -387,6 +419,7 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        removeTaskVolumes(handle);
         return exitCodes;
     }
 
