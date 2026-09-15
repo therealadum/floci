@@ -385,10 +385,19 @@ public class ContainerLifecycleManager {
      * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
      */
     public void ensureVolume(String volumeName) {
+        ensureVolume(volumeName, Map.of());
+    }
+
+    /**
+     * Like {@link #ensureVolume(String)}, with resource labels (e.g.
+     * {@link ContainerStorageHelper#resourceIdentityLabels}) laid over the emulator defaults, so a
+     * volume that belongs to one resource can be found by that resource's labels.
+     */
+    public void ensureVolume(String volumeName, Map<String, String> labels) {
         if (!volumeExists(volumeName)) {
             dockerClient.createVolumeCmd()
                     .withName(volumeName)
-                    .withLabels(ContainerStorageHelper.defaultLabels(config))
+                    .withLabels(mergedLabels(labels))
                     .exec();
             LOG.debugv("Created volume {0}", volumeName);
         }

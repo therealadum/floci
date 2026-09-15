@@ -204,8 +204,23 @@ unchanged.
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable or disable the ECS service |
 | `FLOCI_SERVICES_ECS_MOCK` | `false` | Skip Docker; tasks go straight to `RUNNING` (useful for CI) |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | *(unset)* | Docker network for task containers |
+| `FLOCI_SERVICES_ECS_TASK_NETWORK_MODE` | `shared` | `shared` or `per-container`; see [Task network namespace](#task-network-namespace) |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default memory (MB) when the task definition omits it |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
+
+### Task network namespace
+
+On Fargate, and in `awsvpc` network mode generally, every container of a task shares one network
+namespace: a sidecar reaches its neighbour on `127.0.0.1`, and the task has a single IP with one
+set of ports. Floci reproduces that by letting the first container definition own the namespace and
+creating the task's other containers with Docker's `container:<id>` network mode. Port publishing,
+DNS and `/etc/hosts` entries stay on the owner, which Docker requires; each container keeps its
+`floci-ecs-<taskId>-<container>` name, its own log stream and its own `docker exec` health check.
+
+`FLOCI_SERVICES_ECS_TASK_NETWORK_MODE=per-container` restores the older behaviour, where every
+container is a Docker container with its own IP on the task network and loopback between the
+containers of a task does not work. The setting is ignored for `bridge` and `host` task
+definitions, which do not share a namespace on AWS either, and for single-container tasks.
 
 ### EFS volume ownership
 

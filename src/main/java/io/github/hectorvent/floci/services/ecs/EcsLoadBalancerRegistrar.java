@@ -8,11 +8,13 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
+import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.function.BiConsumer;
 
 /**
@@ -63,38 +65,90 @@ public class EcsLoadBalancerRegistrar {
         });
     }
 
+    /**
+     * Why the task does not yet count as healthy behind its load balancers, or empty when its
+     * registered target in every one of the service's target groups is {@code healthy} by that
+     * group's own health check.
+     * <p>
+     * On AWS a load-balanced service counts a task only once the target group health check
+     * reports it healthy ("the service scheduler waits for the load balancer target group health
+     * check to return a healthy status before counting the task", ECS service definition
+     * parameters). {@code initial}, {@code unhealthy}, {@code draining} and {@code unused} all
+     * keep it out, and so does a target that was never registered.
+     */
+    public Optional<String> pendingTargetReason(EcsTask task, EcsServiceModel svc, String region) {
+        if (svc == null || svc.getLoadBalancers() == null) {
+            return Optional.empty();
+        }
+        for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
+            if (lb.getTargetGroupArn() == null || lb.getTargetGroupArn().isBlank()) {
+                continue;
+            }
+            TargetDescription td = resolveTarget(task, lb);
+            if (td == null) {
+                return Optional.of("task " + task.getTaskArn() + " has no target for container "
+                        + lb.getContainerName() + ":" + lb.getContainerPort()
+                        + " in target group " + lb.getTargetGroupArn());
+            }
+            List<TargetHealth> health;
+            try {
+                health = elbV2Service.describeTargetHealth(region, lb.getTargetGroupArn(), List.of(td));
+            } catch (Exception e) {
+                return Optional.of("target group " + lb.getTargetGroupArn() + " could not be read: " + e.getMessage());
+            }
+            TargetHealth th = health.isEmpty() ? null : health.getFirst();
+            if (th == null || !"healthy".equals(th.getState())) {
+                String state = th == null ? "unknown" : th.getState();
+                String reason = th == null ? null : th.getReason();
+                String description = th == null ? null : th.getDescription();
+                return Optional.of("target " + td.getId() + ":" + td.getPort() + " in target group "
+                        + lb.getTargetGroupArn() + " is " + state
+                        + (reason == null ? "" : " (" + reason + (description == null ? "" : ": " + description) + ")"));
+            }
+        }
+        return Optional.empty();
+    }
+
     private void forEachTarget(EcsTask task, EcsServiceModel svc,
                                BiConsumer<String, TargetDescription> action) {
         if (svc == null || svc.getLoadBalancers() == null || svc.getLoadBalancers().isEmpty()) {
-            return;
-        }
-        if (task.getContainers() == null || task.getContainers().isEmpty()) {
             return;
         }
         for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
             if (lb.getTargetGroupArn() == null || lb.getTargetGroupArn().isBlank()) {
                 continue;
             }
-            Container container = task.getContainers().stream()
-                    .filter(c -> lb.getContainerName() == null
-                            || lb.getContainerName().equals(c.getName()))
-                    .findFirst()
-                    .orElse(null);
-            if (container == null || container.getNetworkBindings() == null) {
-                continue;
+            TargetDescription td = resolveTarget(task, lb);
+            if (td != null) {
+                action.accept(lb.getTargetGroupArn(), td);
             }
-            NetworkBinding binding = container.getNetworkBindings().stream()
-                    .filter(b -> lb.getContainerPort() == null
-                            || lb.getContainerPort() == b.containerPort())
-                    .findFirst()
-                    .orElse(null);
-            if (binding == null) {
-                continue;
-            }
-            TargetDescription td = new TargetDescription();
-            td.setId(containerManager.resolveContainerHost(container));
-            td.setPort(binding.hostPort());
-            action.accept(lb.getTargetGroupArn(), td);
         }
+    }
+
+    /** The target a task's container registers for one load balancer entry, or null if it has none. */
+    private TargetDescription resolveTarget(EcsTask task, EcsLoadBalancer lb) {
+        if (task.getContainers() == null || task.getContainers().isEmpty()) {
+            return null;
+        }
+        Container container = task.getContainers().stream()
+                .filter(c -> lb.getContainerName() == null
+                        || lb.getContainerName().equals(c.getName()))
+                .findFirst()
+                .orElse(null);
+        if (container == null || container.getNetworkBindings() == null) {
+            return null;
+        }
+        NetworkBinding binding = container.getNetworkBindings().stream()
+                .filter(b -> lb.getContainerPort() == null
+                        || lb.getContainerPort() == b.containerPort())
+                .findFirst()
+                .orElse(null);
+        if (binding == null) {
+            return null;
+        }
+        TargetDescription td = new TargetDescription();
+        td.setId(containerManager.resolveContainerHost(container));
+        td.setPort(binding.hostPort());
+        return td;
     }
 }

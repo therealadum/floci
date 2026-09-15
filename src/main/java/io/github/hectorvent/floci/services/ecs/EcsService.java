@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
+import io.github.hectorvent.floci.services.ecs.model.ServiceRevisionSummary;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
@@ -1482,7 +1483,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         }
 
         String deploymentId = deploymentId(svc);
-        boolean converged = svc.getRunningCount() >= svc.getDesiredCount();
+        boolean gated = gatesOnTargetHealth(svc);
+        // A load-balanced deployment completes only once the reconciler has seen every task's
+        // targets healthy, and stays completed; see reconcileService.
+        boolean converged = gated
+                ? deploymentId.equals(svc.getLastCompletedDeploymentId())
+                : svc.getRunningCount() >= svc.getDesiredCount();
+        String pending = gated && !converged ? svc.getPendingTargetReason() : null;
 
         Deployment d = new Deployment();
         d.setId(deploymentId);
@@ -1494,7 +1501,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         d.setFailedTasks(0);
         d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
         d.setRolloutStateReason("ECS deployment " + deploymentId
-                + (converged ? " completed." : " in progress."));
+                + (converged ? " completed." : pending != null ? " in progress: " + pending + "." : " in progress."));
         d.setLaunchType(svc.getLaunchType());
         // The deployment's own start time, not the service's: a task-definition change mints a
         // new deployment id, so reporting service creation here would contradict it. Older
@@ -1532,22 +1539,68 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         return "ecs-svc/" + Long.toUnsignedString(hash);
     }
 
+    /**
+     * Records the {@code DescribeServiceDeployments} view of the deployment the service has just
+     * entered, together with the service revision that deployment rolls out.
+     *
+     * <p>Both ARNs are keyed on the service's own {@code deployments[].id} rather than a fresh
+     * UUID. Clients correlate the two APIs through that id: terraform-provider-aws' ECS service
+     * waiter reads the primary deployment's {@code ecs-svc/<id>} from {@code DescribeServices},
+     * then accepts a {@code ListServiceDeployments} brief only when its
+     * {@code targetServiceRevisionArn} contains that {@code <id>}. An unrelated random id matches
+     * nothing and leaves the provider polling until its 20-minute timeout on every create and
+     * every task-definition change.
+     */
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
-        String deploymentId = UUID.randomUUID().toString().replace("-", "");
-        String deploymentArn = regionResolver.buildArn("ecs", region,
-                "service-deployment/" + deploymentId);
-        String revisionId = UUID.randomUUID().toString().replace("-", "");
-        String revisionArn = regionResolver.buildArn("ecs", region,
-                "service-revision/" + revisionId);
+        // "ecs-svc/<id>" as DescribeServices reports it; the bare <id> is the ARN's last segment.
+        String deploymentId = deploymentId(svc);
+        int slash = deploymentId.lastIndexOf('/');
+        String bareId = slash >= 0 ? deploymentId.substring(slash + 1) : deploymentId;
+
+        // AWS scopes both resource types by cluster and service:
+        // arn:aws:ecs:<region>:<account>:service-deployment/<cluster>/<service>/<id>
+        String scope = clusterNameFromArn(svc.getClusterArn()) + "/" + svc.getServiceName() + "/" + bareId;
+        String deploymentArn = regionResolver.buildArn("ecs", region, "service-deployment/" + scope);
+        String revisionArn = regionResolver.buildArn("ecs", region, "service-revision/" + scope);
+
+        // Revisions this deployment replaces: the target of the service's most recent deployment.
+        List<String> sourceRevisionArns = serviceDeployments.values().stream()
+                .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
+                .filter(d -> d.getTargetServiceRevisionArn() != null)
+                .filter(d -> !revisionArn.equals(d.getTargetServiceRevisionArn()))
+                .max(Comparator.comparing(ServiceDeployment::getCreatedAt))
+                .map(d -> List.of(d.getTargetServiceRevisionArn()))
+                .orElseGet(List::of);
+
+        Instant now = Instant.now();
+
+        // A deployment still rolling out when a newer one starts is stopped, as on AWS.
+        serviceDeployments.values().stream()
+                .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
+                .filter(d -> "IN_PROGRESS".equals(d.getStatus()))
+                .filter(d -> !deploymentArn.equals(d.getServiceDeploymentArn()))
+                .forEach(d -> {
+                    d.setStatus("STOPPED");
+                    d.setUpdatedAt(now);
+                    d.setFinishedAt(now);
+                });
+
+        // A load-balanced deployment stays IN_PROGRESS until its targets are healthy
+        // (completeServiceDeployment); every other deployment is reported as it always was.
+        boolean gated = gatesOnTargetHealth(svc);
 
         ServiceDeployment deployment = new ServiceDeployment();
         deployment.setServiceDeploymentArn(deploymentArn);
         deployment.setServiceArn(svc.getServiceArn());
         deployment.setClusterArn(svc.getClusterArn());
         deployment.setTaskDefinition(taskDefinition);
-        deployment.setStatus("SUCCESSFUL");
-        deployment.setCreatedAt(Instant.now());
-        deployment.setUpdatedAt(Instant.now());
+        deployment.setStatus(gated ? "IN_PROGRESS" : "SUCCESSFUL");
+        deployment.setCreatedAt(now);
+        deployment.setUpdatedAt(now);
+        deployment.setStartedAt(now);
+        deployment.setFinishedAt(gated ? null : now);
+        deployment.setTargetServiceRevisionArn(revisionArn);
+        deployment.setSourceServiceRevisionArns(sourceRevisionArns);
         serviceDeployments.put(deploymentArn, deployment);
 
         ServiceRevision revision = new ServiceRevision();
@@ -1556,8 +1609,34 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         revision.setClusterArn(svc.getClusterArn());
         revision.setTaskDefinition(taskDefinition);
         revision.setLaunchType(svc.getLaunchType());
-        revision.setCreatedAt(Instant.now());
+        revision.setCreatedAt(now);
         serviceRevisions.put(revisionArn, revision);
+    }
+
+    /**
+     * The compact {@code ServiceRevisionSummary} that {@code DescribeServiceDeployments} embeds
+     * for a revision. The counts are the owning service's live counts, as on AWS; a revision
+     * whose service is gone reports zeroes rather than being omitted.
+     */
+    public ServiceRevisionSummary serviceRevisionSummary(String revisionArn) {
+        ServiceRevision revision = serviceRevisions.get(revisionArn);
+        EcsServiceModel svc = revision == null ? null : services.values().stream()
+                .filter(s -> revision.getServiceArn().equals(s.getServiceArn()))
+                .findFirst()
+                .orElse(null);
+        if (svc == null) {
+            return new ServiceRevisionSummary(revisionArn, 0, 0, 0);
+        }
+        return new ServiceRevisionSummary(revisionArn, svc.getDesiredCount(),
+                svc.getRunningCount(), svc.getPendingCount());
+    }
+
+    private static String clusterNameFromArn(String clusterArn) {
+        if (clusterArn == null) {
+            return "default";
+        }
+        int slash = clusterArn.lastIndexOf('/');
+        return slash >= 0 ? clusterArn.substring(slash + 1) : clusterArn;
     }
 
     // ── Stub operations ────────────────────────────────────────────────────────
@@ -1883,6 +1962,32 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 && cluster.getClusterArn().equals(task.getClusterArn());
     }
 
+    /**
+     * Whether the service's deployments wait for target health. Only a load-balanced service in
+     * docker mode: mock-mode tasks run no containers and never register a target, so gating them
+     * would hold every deployment open forever.
+     */
+    private boolean gatesOnTargetHealth(EcsServiceModel svc) {
+        return dockerMode && svc.getLoadBalancers() != null && !svc.getLoadBalancers().isEmpty();
+    }
+
+    /** Marks the service's current deployment SUCCESSFUL once its tasks are healthy behind the load balancer. */
+    private void completeServiceDeployment(EcsServiceModel svc) {
+        String deploymentId = deploymentId(svc);
+        int slash = deploymentId.lastIndexOf('/');
+        String bareId = slash >= 0 ? deploymentId.substring(slash + 1) : deploymentId;
+        Instant now = Instant.now();
+        serviceDeployments.values().stream()
+                .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
+                .filter(d -> "IN_PROGRESS".equals(d.getStatus()))
+                .filter(d -> d.getServiceDeploymentArn() != null && d.getServiceDeploymentArn().endsWith("/" + bareId))
+                .forEach(d -> {
+                    d.setStatus("SUCCESSFUL");
+                    d.setUpdatedAt(now);
+                    d.setFinishedAt(now);
+                });
+    }
+
     private void reconcileService(String key, EcsServiceModel svc) {
         if (!"ACTIVE".equals(svc.getStatus())) {
             return;
@@ -1911,20 +2016,42 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
 
         svc.setRunningCount((int) running);
 
-        if (eventPublisher != null) {
-            String deploymentId = currentDeploymentId;
-            boolean converged = current >= svc.getDesiredCount();
-            if (converged) {
-                if (!deploymentId.equals(svc.getLastCompletedDeploymentId())) {
-                    svc.setLastCompletedDeploymentId(deploymentId);
-                    services.put(key, svc);
+        String deploymentId = currentDeploymentId;
+        boolean countsMet = current >= svc.getDesiredCount();
+        boolean alreadyCompleted = deploymentId.equals(svc.getLastCompletedDeploymentId());
+        boolean converged;
+        if (gatesOnTargetHealth(svc)) {
+            // AWS counts a load-balanced task only once its target group health check reports it
+            // healthy, so the deployment reaches steady state only when every current task's
+            // target in every target group is healthy. Once completed it stays completed.
+            String pending = null;
+            if (countsMet && !alreadyCompleted) {
+                pending = runningTasks.stream()
+                        .filter(t -> !staleTasks.contains(t))
+                        .map(t -> lbRegistrar.pendingTargetReason(t, svc, region))
+                        .flatMap(java.util.Optional::stream)
+                        .findFirst()
+                        .orElse(null);
+            }
+            svc.setPendingTargetReason(alreadyCompleted || !countsMet ? null : pending);
+            converged = alreadyCompleted || (countsMet && pending == null);
+        } else {
+            converged = countsMet;
+        }
+
+        if (converged) {
+            if (!alreadyCompleted) {
+                svc.setLastCompletedDeploymentId(deploymentId);
+                services.put(key, svc);
+                completeServiceDeployment(svc);
+                if (eventPublisher != null) {
                     eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_COMPLETED",
                             "ECS deployment " + deploymentId + " completed.", region);
                 }
-            } else if (inProgressEmitted.add(deploymentId)) {
-                eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_IN_PROGRESS",
-                        "ECS deployment " + deploymentId + " in progress.", region);
             }
+        } else if (eventPublisher != null && inProgressEmitted.add(deploymentId)) {
+            eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_IN_PROGRESS",
+                    "ECS deployment " + deploymentId + " in progress.", region);
         }
 
         if (current < svc.getDesiredCount()) {

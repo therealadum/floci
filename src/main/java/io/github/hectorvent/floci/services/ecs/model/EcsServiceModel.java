@@ -27,6 +27,11 @@ public class EcsServiceModel {
     private String deploymentId;
     /** The deploymentId last observed to reach steady state; guards against re-emitting COMPLETED. */
     private String lastCompletedDeploymentId;
+    /**
+     * Why a load-balanced deployment is still in progress: the first task target that is not yet
+     * {@code healthy} by its target group's health check. Null when nothing is pending.
+     */
+    private String pendingTargetReason;
     private String namespace;
     private String deploymentController;
     private String schedulingStrategy;
@@ -74,6 +79,9 @@ public class EcsServiceModel {
     public void setLastCompletedDeploymentId(String lastCompletedDeploymentId) {
         this.lastCompletedDeploymentId = lastCompletedDeploymentId;
     }
+
+    public String getPendingTargetReason() { return pendingTargetReason; }
+    public void setPendingTargetReason(String pendingTargetReason) { this.pendingTargetReason = pendingTargetReason; }
 
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }

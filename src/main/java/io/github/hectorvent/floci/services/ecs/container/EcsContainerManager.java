@@ -108,6 +108,10 @@ public class EcsContainerManager {
         // name -> EFS configuration (materialised below as a shared local Docker volume).
         Map<String, String> volumeSourcePaths = new LinkedHashMap<>();
         Map<String, EfsVolumeConfiguration> efsVolumes = new LinkedHashMap<>();
+        // A volume with neither host nor EFS configuration is a task-scoped scratch volume: on
+        // Fargate it is ephemeral storage shared by every container of the task that mounts it,
+        // and removed when the task stops. Locally it is one Docker named volume per task.
+        Map<String, String> taskVolumes = new LinkedHashMap<>();
         if (taskDef.getVolumes() != null) {
             for (Volume v : taskDef.getVolumes()) {
                 if (v.name() == null) {
@@ -117,8 +121,15 @@ public class EcsContainerManager {
                     volumeSourcePaths.put(v.name(), v.hostSourcePath());
                 } else if (v.efs() != null) {
                     efsVolumes.put(v.name(), v.efs());
+                } else {
+                    taskVolumes.put(v.name(), ContainerStorageHelper.dockerName(config, taskVolumeName(taskId, v.name())));
                 }
             }
+        }
+        Map<String, String> taskVolumeLabels = ContainerStorageHelper.resourceIdentityLabels(
+                "ecs", taskId, regionResolver.getAccountId(), region);
+        for (String dockerVolume : taskVolumes.values()) {
+            lifecycleManager.ensureVolume(dockerVolume, taskVolumeLabels);
         }
 
         Map<String, ContainerOverride> overridesByName = overridesByName(containerOverrides);
@@ -130,8 +141,19 @@ public class EcsContainerManager {
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
+        // On Fargate and in awsvpc mode every container of a task shares ONE network namespace:
+        // sidecars reach each other on 127.0.0.1 and the task has a single IP. Reproduce that by
+        // letting the first container definition own the namespace and creating the rest with
+        // Docker's "container:<id>" network mode. Docker rejects port publishing, DNS and
+        // /etc/hosts entries on a container that joins another's namespace, so the owner carries
+        // the whole task's port mappings, DNS and extra hosts on everyone's behalf.
+        boolean sharedNetns = sharesTaskNetworkNamespace(taskDef);
+        String netnsOwnerId = null;
+
+        boolean firstContainer = true;
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
             String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
+            boolean ownsNetns = !sharedNetns || firstContainer;
 
             // RunTask containerOverrides matched by container name: command replaces
             // the task-def command; environment is merged over the task-def environment.
@@ -141,16 +163,23 @@ public class EcsContainerManager {
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(imagesByContainer.get(def))
                     .withName(containerName)
                     .withEnv(envVarsByContainer.get(def))
-                    .withDockerNetwork(config.services().ecs().dockerNetwork())
-                    // Resolve Floci's endpoint from inside the task container the same way Lambda
-                    // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
-                    // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
-                    // own loopback.
-                    .withHostDockerInternalOnLinux()
-                    .withEmbeddedDns()
                     .withLogRotation()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "ecs", taskId, regionResolver.getAccountId(), region));
+
+            if (ownsNetns) {
+                specBuilder.withDockerNetwork(config.services().ecs().dockerNetwork())
+                        // Resolve Floci's endpoint from inside the task container the same way Lambda
+                        // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
+                        // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
+                        // own loopback.
+                        .withHostDockerInternalOnLinux()
+                        .withEmbeddedDns();
+            } else {
+                // No network, DNS or extra hosts of its own: it inherits the owner's, and Docker
+                // fails container creation outright if any of them is set alongside this mode.
+                specBuilder.withNetworkMode("container:" + netnsOwnerId);
+            }
 
             // Add memory limit if specified
             if (def.getMemory() != null) {
@@ -165,10 +194,15 @@ public class EcsContainerManager {
             // local Docker host (#1778) — awsvpc mappings always get a dynamic
             // host port in native mode, or expose-only in Docker mode where ECS
             // consumers reach containers via the docker network IP.
-            if (def.getPortMappings() != null) {
+            // Under a shared namespace the ports belong to the namespace, not the container, so
+            // the owner publishes every container's mappings and the others publish none.
+            List<PortMapping> portMappings = ownsNetns
+                    ? (sharedNetns ? taskPortMappings(taskDef) : def.getPortMappings())
+                    : List.of();
+            if (portMappings != null) {
                 boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
                 boolean publishToHost = !containerDetector.isRunningInContainer();
-                for (PortMapping pm : def.getPortMappings()) {
+                for (PortMapping pm : portMappings) {
                     if (!awsvpc && pm.hostPort() > 0) {
                         specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
                     } else if (publishToHost) {
@@ -202,7 +236,11 @@ public class EcsContainerManager {
                     }
                     String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
                     EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
-                    if (sourcePath != null) {
+                    String taskVolume = taskVolumes.get(mp.sourceVolume());
+                    if (taskVolume != null) {
+                        // Task scratch volume: the same named volume in every container that mounts it.
+                        specBuilder.withNamedVolume(taskVolume, mp.containerPath(), mp.readOnly());
+                    } else if (sourcePath != null) {
                         // Host volume: bind-mount an absolute path on the Docker host.
                         if (mp.readOnly()) {
                             specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
@@ -223,11 +261,18 @@ public class EcsContainerManager {
             // Create and start container
             ContainerInfo info = lifecycleManager.createAndStart(spec);
             String dockerId = info.containerId();
+            if (sharedNetns && netnsOwnerId == null) {
+                netnsOwnerId = dockerId;
+            }
+            firstContainer = false;
 
             LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
 
-            // Resolve network bindings for ECS-specific model
-            List<NetworkBinding> networkBindings = resolveNetworkBindings(dockerId, def);
+            // Resolve network bindings for ECS-specific model. Under a shared namespace the
+            // published ports live on the namespace owner, so every container reports the
+            // bindings inspected there — the task has one set of bindings, as on AWS.
+            List<NetworkBinding> networkBindings =
+                    resolveNetworkBindings(sharedNetns ? netnsOwnerId : dockerId, def);
 
             // Build ECS container model
             Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
@@ -251,7 +296,63 @@ public class EcsContainerManager {
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
-        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId);
+        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
+                List.copyOf(taskVolumes.values()));
+    }
+
+    /**
+     * The Docker volume that backs one task scratch volume, before any resource namespace is
+     * applied: unique to the task, so two tasks of one service never share scratch storage.
+     */
+    static String taskVolumeName(String taskId, String volumeName) {
+        return "floci-ecs-" + taskId + "-vol-" + volumeName;
+    }
+
+    /** Removes the task's scratch volumes once its containers are gone; data does not outlive the task. */
+    private void removeTaskVolumes(EcsTaskHandle handle) {
+        for (String volume : handle.getVolumeNames()) {
+            lifecycleManager.removeVolume(volume);
+        }
+    }
+
+    /** The configured value of {@code floci.services.ecs.task-network-mode} that shares a namespace. */
+    static final String TASK_NETWORK_MODE_SHARED = "shared";
+
+    /**
+     * Whether the containers of this task all live in one network namespace, so that a sidecar
+     * reaches its neighbour on {@code 127.0.0.1} as it does on Fargate.
+     *
+     * <p>True for a multi-container {@code awsvpc} task unless
+     * {@code floci.services.ecs.task-network-mode} is set to {@code per-container}. A
+     * {@code bridge} or {@code host} task does not share a namespace on AWS either, and a
+     * single-container task has nothing to share with.
+     */
+    private boolean sharesTaskNetworkNamespace(TaskDefinition taskDef) {
+        if (taskDef.getNetworkMode() != NetworkMode.awsvpc) {
+            return false;
+        }
+        if (taskDef.getContainerDefinitions() == null || taskDef.getContainerDefinitions().size() < 2) {
+            return false;
+        }
+        return TASK_NETWORK_MODE_SHARED.equalsIgnoreCase(config.services().ecs().taskNetworkMode());
+    }
+
+    /**
+     * Every port mapping of the task, in container-definition order, deduplicated by container
+     * port: under a shared namespace they all belong to the one namespace, so they are published
+     * once, by its owner.
+     */
+    private static List<PortMapping> taskPortMappings(TaskDefinition taskDef) {
+        Map<Integer, PortMapping> byContainerPort = new LinkedHashMap<>();
+        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+            if (def.getPortMappings() == null) {
+                continue;
+            }
+            for (PortMapping pm : def.getPortMappings()) {
+                byContainerPort.putIfAbsent(pm.containerPort(), pm);
+            }
+        }
+        return List.copyOf(byContainerPort.values());
     }
 
     /**
@@ -274,6 +375,7 @@ public class EcsContainerManager {
         }
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        removeTaskVolumes(handle);
     }
 
     /**
@@ -317,6 +419,7 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        removeTaskVolumes(handle);
         return exitCodes;
     }
 
@@ -487,7 +590,8 @@ public class EcsContainerManager {
             return "127.0.0.1";
         }
         try {
-            var inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            var inspect = lifecycleManager.getDockerClient()
+                    .inspectContainerCmd(networkNamespaceOwner(dockerId)).exec();
             var networks = inspect.getNetworkSettings().getNetworks();
 
             // A container can be on multiple networks; getNetworks() is unordered.
@@ -518,6 +622,25 @@ public class EcsContainerManager {
             LOG.warnv("Could not resolve container IP for {0}: {1}", dockerId, e.getMessage());
         }
         return "127.0.0.1";
+    }
+
+    /**
+     * The container that actually owns {@code dockerId}'s network namespace: itself, or the
+     * container named by a {@code container:<id>} Docker network mode. A container sharing a
+     * sibling's namespace has no network settings of its own, so an IP or port lookup has to
+     * follow the link — for at most one hop, since Docker forbids chaining.
+     */
+    private String networkNamespaceOwner(String dockerId) {
+        try {
+            var inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            String mode = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getNetworkMode();
+            if (mode != null && mode.startsWith("container:")) {
+                return mode.substring("container:".length());
+            }
+        } catch (Exception e) {
+            LOG.debugv("Could not resolve the network namespace owner of {0}: {1}", dockerId, e.getMessage());
+        }
+        return dockerId;
     }
 
     private static boolean isUsableIp(String ip) {

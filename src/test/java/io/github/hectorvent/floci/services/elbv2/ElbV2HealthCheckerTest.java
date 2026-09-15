@@ -158,6 +158,52 @@ class ElbV2HealthCheckerTest {
     }
 
     @Test
+    void numericHealthCheckPortProbesThatPortAndKeysHealthOnTrafficPort() throws Exception {
+        HttpServer trafficServer = startServer(503);
+        HttpServer healthServer = startServer(200);
+        try {
+            ElbV2HealthChecker checker = healthChecker();
+            TargetGroup targetGroup = targetGroup(trafficServer.actualPort(), "200", 1, 1);
+            targetGroup.setHealthCheckPort(String.valueOf(healthServer.actualPort()));
+            TargetDescription target = target("127.0.0.1", trafficServer.actualPort());
+
+            checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(
+                    "healthy",
+                    checker.getHealth(targetGroup.getTargetGroupArn(), target.getId(), target.getPort()).state()));
+            assertEquals(healthServer.actualPort(),
+                    ElbV2HealthChecker.healthCheckPort(target.getPort(), targetGroup));
+        } finally {
+            close(trafficServer);
+            close(healthServer);
+        }
+    }
+
+    @Test
+    void trafficPortHealthCheckPortProbesTheTargetsTrafficPort() throws Exception {
+        HttpServer trafficServer = startServer(503);
+        try {
+            ElbV2HealthChecker checker = healthChecker();
+            TargetGroup targetGroup = targetGroup(trafficServer.actualPort(), "200", 1, 1);
+            targetGroup.setHealthCheckPort("traffic-port");
+            TargetDescription target = target("127.0.0.1", trafficServer.actualPort());
+
+            checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+                ElbV2HealthChecker.TargetHealthStatus health = checker.getHealth(
+                        targetGroup.getTargetGroupArn(), target.getId(), target.getPort());
+                assertEquals("unhealthy", health.state());
+                assertEquals("Health checks failed with these codes: [503]", health.description());
+            });
+            assertEquals(target.getPort(), ElbV2HealthChecker.healthCheckPort(target.getPort(), targetGroup));
+        } finally {
+            close(trafficServer);
+        }
+    }
+
+    @Test
     void registrationStateCarriesAwsReasonUntilFirstProbeCompletes() {
         ElbV2HealthChecker checker = healthChecker();
 

@@ -8,6 +8,10 @@ COPY pom.xml .
 RUN mvn dependency:go-offline -q
 
 COPY src/ src/
+# build-helper adds sidecars/cedar/src/main/java as a test source root, and -DskipTests still
+# runs testCompile, so the sidecar sources have to be in the context or the build fails on
+# "package io.github.hectorvent.floci.cedar does not exist". .dockerignore already un-ignores it.
+COPY sidecars/cedar/ sidecars/cedar/
 RUN mvn clean package -DskipTests -q
 
 # Stage 2: Runtime

@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.RuntimePlatform;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
+import io.github.hectorvent.floci.services.ecs.model.ServiceRevisionSummary;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
@@ -850,13 +851,21 @@ public class EcsJsonHandler {
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
         deployments.forEach(d -> {
+            // ServiceDeploymentBrief. targetServiceRevisionArn is load-bearing, not decoration:
+            // terraform-provider-aws' ECS service waiter picks its own deployment out of this list
+            // by testing that the revision ARN contains the primary deployment's id, and polls
+            // until its timeout when no brief carries one.
             ObjectNode brief = objectMapper.createObjectNode();
             brief.put("serviceDeploymentArn", d.getServiceDeploymentArn());
             brief.put("serviceArn", d.getServiceArn());
             brief.put("clusterArn", d.getClusterArn());
             brief.put("status", d.getStatus());
+            if (d.getTargetServiceRevisionArn() != null) {
+                brief.put("targetServiceRevisionArn", d.getTargetServiceRevisionArn());
+            }
             if (d.getCreatedAt() != null) { brief.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
-            if (d.getUpdatedAt() != null) { brief.put("finishedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
+            if (d.getStartedAt() != null) { brief.put("startedAt", d.getStartedAt().toEpochMilli() / 1000.0); }
+            if (d.getFinishedAt() != null) { brief.put("finishedAt", d.getFinishedAt().toEpochMilli() / 1000.0); }
             arr.add(brief);
         });
         resp.set("serviceDeployments", arr);
@@ -1342,6 +1351,30 @@ public class EcsJsonHandler {
         n.put("status", d.getStatus());
         if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
         if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
+        if (d.getStartedAt() != null) { n.put("startedAt", d.getStartedAt().toEpochMilli() / 1000.0); }
+        if (d.getFinishedAt() != null) { n.put("finishedAt", d.getFinishedAt().toEpochMilli() / 1000.0); }
+        // DescribeServiceDeployments carries the revisions as ServiceRevisionSummary objects,
+        // unlike the brief, which flattens the target to a bare targetServiceRevisionArn string.
+        if (d.getTargetServiceRevisionArn() != null) {
+            n.set("targetServiceRevision",
+                    serviceRevisionSummaryNode(service.serviceRevisionSummary(d.getTargetServiceRevisionArn())));
+        }
+        if (d.getSourceServiceRevisionArns() != null && !d.getSourceServiceRevisionArns().isEmpty()) {
+            ArrayNode sources = objectMapper.createArrayNode();
+            for (String sourceArn : d.getSourceServiceRevisionArns()) {
+                sources.add(serviceRevisionSummaryNode(service.serviceRevisionSummary(sourceArn)));
+            }
+            n.set("sourceServiceRevisions", sources);
+        }
+        return n;
+    }
+
+    private ObjectNode serviceRevisionSummaryNode(ServiceRevisionSummary summary) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("arn", summary.arn());
+        n.put("requestedTaskCount", summary.requestedTaskCount());
+        n.put("runningTaskCount", summary.runningTaskCount());
+        n.put("pendingTaskCount", summary.pendingTaskCount());
         return n;
     }
 
