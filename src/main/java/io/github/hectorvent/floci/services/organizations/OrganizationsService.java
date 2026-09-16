@@ -114,14 +114,19 @@ public class OrganizationsService implements ScpProvider {
     private static final String FEATURE_SET_CONSOLIDATED_BILLING = "CONSOLIDATED_BILLING";
 
     private static final String STATUS_ACTIVE = "ACTIVE";
+    private static final String STATE_ACTIVE = "ACTIVE";
     /**
-     * The terminal state a closed account reaches. AWS passes through {@code PENDING_CLOSURE}
-     * first and settles on {@code SUSPENDED} some minutes later; the emulator reaches the
-     * terminal state in the call that starts it, so a client reading the account back — a
-     * provider waiting for {@code SUSPENDED}, say — sees it on its first read instead of
-     * polling {@code DescribeAccount} for a transition nothing here would ever make.
+     * The terminal shape a closed account reaches, rendered in both fields the handler puts on
+     * an account: the legacy {@code Status}, which AWS passes through {@code PENDING_CLOSURE}
+     * first and settles on {@code SUSPENDED} some minutes later, and {@code State}, which AWS
+     * settles on {@code CLOSED}. The Pulumi AWS provider's delete waiter reads only {@code State}
+     * and treats {@code CLOSED} as gone. The emulator reaches this terminal shape in the call
+     * that starts it, so a client reading the account back — the provider waiting for the
+     * account to be gone, say — sees it on its first read instead of polling {@code
+     * DescribeAccount} for a transition nothing here would ever make.
      */
     private static final String STATUS_SUSPENDED = "SUSPENDED";
+    private static final String STATE_CLOSED = "CLOSED";
 
     private static final String HANDSHAKE_REQUESTED = "REQUESTED";
     private static final String HANDSHAKE_ACCEPTED = "ACCEPTED";
@@ -294,6 +299,7 @@ public class OrganizationsService implements ScpProvider {
         master.setEmail(organization.getMasterAccountEmail());
         master.setName("management-account");
         master.setStatus(STATUS_ACTIVE);
+        master.setState(STATE_ACTIVE);
         master.setJoinedMethod("INVITED");
         master.setJoinedTimestamp(organization.getCreatedTimestamp());
         master.setOrganizationId(organizationId);
@@ -624,6 +630,7 @@ public class OrganizationsService implements ScpProvider {
                     "The management account can't be closed.", 400);
         }
         account.setStatus(STATUS_SUSPENDED);
+        account.setState(STATE_CLOSED);
         accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
         return account;
     }
@@ -1683,6 +1690,7 @@ public class OrganizationsService implements ScpProvider {
         account.setEmail(email);
         account.setName(name);
         account.setStatus(STATUS_ACTIVE);
+        account.setState(STATE_ACTIVE);
         account.setJoinedMethod(joinedMethod);
         account.setJoinedTimestamp(Instant.now());
         account.setOrganizationId(organization.getId());

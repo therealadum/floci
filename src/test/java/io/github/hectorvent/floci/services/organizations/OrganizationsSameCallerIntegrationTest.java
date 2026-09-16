@@ -94,7 +94,7 @@ class OrganizationsSameCallerIntegrationTest {
 
     @Test
     @Order(3)
-    void closeAccountSuspendsTheAccountAtOnce() {
+    void closeAccountReachesStateClosedWithStatusSuspendedAtOnce() {
         organizations("CloseAccount", "{\"AccountId\":\"" + memberAccountId + "\"}")
         .when()
             .post("/")
@@ -106,6 +106,7 @@ class OrganizationsSameCallerIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
+            .body("Account.State", equalTo("CLOSED"))
             .body("Account.Status", equalTo("SUSPENDED"));
 
         organizations("ListAccounts", "{}")
@@ -113,6 +114,7 @@ class OrganizationsSameCallerIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
+            .body("Accounts.findAll { it.Id == '" + memberAccountId + "' }.State", hasItem("CLOSED"))
             .body("Accounts.findAll { it.Id == '" + memberAccountId + "' }.Status", hasItem("SUSPENDED"));
     }
 

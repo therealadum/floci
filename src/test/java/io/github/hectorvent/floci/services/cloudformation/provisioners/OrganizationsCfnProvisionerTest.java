@@ -212,6 +212,7 @@ class OrganizationsCfnProvisionerTest {
         account.setName("Dev");
         account.setEmail("dev@example.com");
         account.setStatus("ACTIVE");
+        account.setState("ACTIVE");
         account.setJoinedMethod("CREATED");
         account.setJoinedTimestamp(Instant.parse("2026-08-23T00:00:00Z"));
         account.setParentId(parentId);

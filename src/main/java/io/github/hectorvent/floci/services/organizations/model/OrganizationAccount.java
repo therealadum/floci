@@ -21,6 +21,7 @@ public class OrganizationAccount {
     private String email;
     private String name;
     private String status;
+    private String state;
     private String joinedMethod;
     private Instant joinedTimestamp;
     private String organizationId;
@@ -68,6 +69,14 @@ public class OrganizationAccount {
 
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public String getState() {
+        return state;
+    }
+
+    public void setState(String state) {
+        this.state = state;
     }
 
     public String getJoinedMethod() {

@@ -78,7 +78,7 @@ call `LeaveOrganization`. An account in no organization gets
 | `MoveAccount` | Moves an account from one root or OU to another. |
 | `RemoveAccountFromOrganization` | Removes a member account from the organization. |
 | `LeaveOrganization` | Removes the calling member account from its organization. |
-| `CloseAccount` | Closes a member account, moving it to SUSPENDED at once. |
+| `CloseAccount` | Closes a member account, moving it to State CLOSED with Status SUSPENDED at once. |
 | `CreatePolicy` | Creates a policy of the specified type in the organization. |
 | `UpdatePolicy` | Updates the name, description or content of a customer-managed policy. |
 | `DeletePolicy` | Deletes a policy that is not attached to any target. |

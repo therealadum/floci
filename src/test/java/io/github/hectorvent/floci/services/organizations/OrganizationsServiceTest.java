@@ -396,19 +396,25 @@ class OrganizationsServiceTest {
     }
 
     @Test
-    void closingAnAccountSuspendsItAtOnceAndEveryReadReportsIt() {
+    void closingAnAccountReachesStateClosedWithStatusSuspendedAtOnceAndEveryReadReportsIt() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         String accountId =
                 service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false).getAccountId();
 
         OrganizationAccount closed = service.closeAccount(MANAGEMENT_ACCOUNT, accountId);
 
+        assertEquals("CLOSED", closed.getState());
         assertEquals("SUSPENDED", closed.getStatus());
-        assertEquals("SUSPENDED", service.describeAccount(MANAGEMENT_ACCOUNT, accountId).getStatus());
-        assertEquals("SUSPENDED", service.listAccounts(MANAGEMENT_ACCOUNT).stream()
+
+        OrganizationAccount described = service.describeAccount(MANAGEMENT_ACCOUNT, accountId);
+        assertEquals("CLOSED", described.getState());
+        assertEquals("SUSPENDED", described.getStatus());
+
+        OrganizationAccount listed = service.listAccounts(MANAGEMENT_ACCOUNT).stream()
                 .filter(account -> accountId.equals(account.getId()))
                 .findFirst()
-                .orElseThrow()
-                .getStatus());
+                .orElseThrow();
+        assertEquals("CLOSED", listed.getState());
+        assertEquals("SUSPENDED", listed.getStatus());
     }
 }
