@@ -161,7 +161,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(loadBalancerXml(lb)).end("member");
         }
         xml.end("LoadBalancers")
-           .elem("NextMarker", "")
            .end("DescribeLoadBalancersResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeLoadBalancersResponse");
@@ -329,7 +328,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(targetGroupXml(tg)).end("member");
         }
         xml.end("TargetGroups")
-           .elem("NextMarker", "")
            .end("DescribeTargetGroupsResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeTargetGroupsResponse");
@@ -451,7 +449,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(listenerXml(l)).end("member");
         }
         xml.end("Listeners")
-           .elem("NextMarker", "")
            .end("DescribeListenersResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenersResponse");
@@ -569,7 +566,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(ruleXml(r)).end("member");
         }
         xml.end("Rules")
-           .elem("NextMarker", "")
            .end("DescribeRulesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeRulesResponse");
@@ -733,7 +729,6 @@ public class ElbV2QueryHandler {
             xml.start("member").elem("Name", e.getKey()).elem("Max", e.getValue()).end("member");
         }
         xml.end("Limits")
-           .elem("NextMarker", "")
            .end("DescribeAccountLimitsResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeAccountLimitsResponse");
@@ -806,7 +801,6 @@ public class ElbV2QueryHandler {
             xml.start("member").elem("CertificateArn", c).end("member");
         }
         xml.end("Certificates")
-           .elem("NextMarker", "")
            .end("DescribeListenerCertificatesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenerCertificatesResponse");
