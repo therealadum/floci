@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
@@ -26,7 +28,9 @@ import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.RealtimeLogConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 
 import java.security.SecureRandom;
@@ -82,7 +86,7 @@ public class CloudFrontService {
     private static final Map<String, ResponseHeadersPolicy> MANAGED_RESPONSE_HEADERS_POLICIES =
             managedResponseHeadersPolicies();
 
-    private final StorageBackend<String, Distribution> distStore;
+    private final AccountAwareStorageBackend<Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
     private final StorageBackend<String, CachePolicy> cachePolicyStore;
     private final StorageBackend<String, OriginRequestPolicy> orpStore;
@@ -101,9 +105,12 @@ public class CloudFrontService {
     private final StorageBackend<String, MonitoringSubscription> monitoringStore;
     private final String accountId;
     private final String domainSuffix;
+    private final TlsCertificateManager certificateManager;
 
     @Inject
-    public CloudFrontService(StorageFactory factory, EmulatorConfig config) {
+    public CloudFrontService(StorageFactory factory, EmulatorConfig config,
+                             TlsCertificateManager certificateManager) {
+        this.certificateManager = certificateManager;
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
@@ -144,7 +151,14 @@ public class CloudFrontService {
 
     // ── Distributions ─────────────────────────────────────────────────────────
 
-    public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
+    public Distribution createDistribution(Distribution dist, Map<String, String> tags) {
+        Distribution created = storeNewDistribution(dist, tags);
+        // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
+        ensureAliasHosts(created.getConfig());
+        return created;
+    }
+
+    private synchronized Distribution storeNewDistribution(Distribution dist, Map<String, String> tags) {
         ensureAliasesAvailable(dist.getConfig(), null);
         validateOriginCustomHeaders(dist.getConfig());
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
@@ -169,7 +183,14 @@ public class CloudFrontService {
                 new AwsException("NoSuchDistribution", "The specified distribution does not exist.", 404));
     }
 
-    public synchronized Distribution updateDistribution(String id, String ifMatch, Distribution updated) {
+    public Distribution updateDistribution(String id, String ifMatch, Distribution updated) {
+        Distribution stored = storeUpdatedDistribution(id, ifMatch, updated);
+        // Outside the lock: the reissue blocks until the HTTPS listener has switched certificates.
+        ensureAliasHosts(stored.getConfig());
+        return stored;
+    }
+
+    private synchronized Distribution storeUpdatedDistribution(String id, String ifMatch, Distribution updated) {
         Distribution existing = getDistribution(id);
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -362,6 +383,32 @@ public class CloudFrontService {
             }
         }
         return best;
+    }
+
+    /**
+     * Floci's served certificate names {@code *.localhost.floci.io} one label deep, so an alias
+     * such as {@code grafana.a.localhost.floci.io} sits below it uncovered. Each alias is added
+     * to the served certificate the way an API Gateway custom domain is. A name outside a local
+     * suffix is refused by the manager itself, and no failure reaches the caller's operation.
+     */
+    private void ensureAliasHosts(DistributionConfig config) {
+        if (config == null || config.getAliases() == null) {
+            return;
+        }
+        for (String alias : config.getAliases()) {
+            certificateManager.ensureHost(alias);
+        }
+    }
+
+    /**
+     * Floci restarts on persistent storage, so a distribution created before this pass existed, or
+     * before a reissue was lost, is covered here as if it had just been created. Every account is
+     * scanned, since a distribution outlives the account context that created it.
+     */
+    void onStart(@Observes StartupEvent ignored) {
+        for (Distribution dist : distStore.scanAllAccounts()) {
+            ensureAliasHosts(dist.getConfig());
+        }
     }
 
     private void ensureAliasesAvailable(DistributionConfig config, String currentDistributionId) {

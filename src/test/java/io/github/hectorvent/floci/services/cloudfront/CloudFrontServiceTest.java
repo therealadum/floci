@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -134,7 +135,7 @@ class CloudFrontServiceTest {
         when(servicesConfig.cloudfront()).thenReturn(cloudFrontConfig);
         when(cloudFrontConfig.domainSuffix()).thenReturn(domainSuffix);
 
-        return new CloudFrontService(storageFactory, config);
+        return new CloudFrontService(storageFactory, config, Mockito.mock(TlsCertificateManager.class));
     }
 
     @Test
