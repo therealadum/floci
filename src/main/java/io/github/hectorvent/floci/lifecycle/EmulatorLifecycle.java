@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -85,6 +86,7 @@ public class EmulatorLifecycle {
     private final RdsService rdsService;
     private final ElbV2Service elbV2Service;
     private final ElbClassicService elbClassicService;
+    private final EcsService ecsService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -119,6 +121,7 @@ public class EmulatorLifecycle {
                              RdsService rdsService,
                              ElbV2Service elbV2Service,
                              ElbClassicService elbClassicService,
+                             EcsService ecsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
@@ -152,6 +155,7 @@ public class EmulatorLifecycle {
         this.rdsService = rdsService;
         this.elbV2Service = elbV2Service;
         this.elbClassicService = elbClassicService;
+        this.ecsService = ecsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
@@ -213,6 +217,12 @@ public class EmulatorLifecycle {
         }
         if (config.services().elb().enabled()) {
             elbClassicService.restorePersistedRuntime();
+        }
+        if (config.services().ecs().enabled()) {
+            // Also the one thing that reaches the ECS bean at start: until something does, its
+            // @PostConstruct never runs, so a recreated container holds every persisted service
+            // and runs no task until the first ECS request arrives.
+            ecsService.restorePersistedRuntime();
         }
 
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {

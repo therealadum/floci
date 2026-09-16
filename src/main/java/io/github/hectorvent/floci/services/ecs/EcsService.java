@@ -44,6 +44,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Optional;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -116,6 +117,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private Map<String, String> accountSettings = new ConcurrentHashMap<>();
     // deploymentIds for which SERVICE_DEPLOYMENT_IN_PROGRESS has already been emitted this process.
     private final Set<String> inProgressEmitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // serviceName -> reason, for every persisted ACTIVE service seen by restorePersistedRuntime()
+    // that has not converged yet. Empty means the restored runtime is up: health reads it.
+    private final Map<String, String> restoredPending = new ConcurrentHashMap<>();
+    private volatile boolean storageInitialized;
 
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -137,6 +142,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     }
 
     void initializeStorage() {
+        storageInitialized = true;
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
         }
@@ -155,6 +161,88 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 new TypeReference<Map<String, List<Attribute>>>() {});
         this.accountSettings = storageBacked("ecs-account-settings.json",
                 new TypeReference<Map<String, String>>() {});
+    }
+
+    /**
+     * Brings the runtime of the persisted ECS state back up, the way {@code ElbV2Service} does for
+     * its listeners. Invoked from {@code EmulatorLifecycle} after {@code storageFactory.loadAll()}:
+     * a recreated container holds every service on its volume but runs no task, and the bean is
+     * only reached by the first ECS request, so without this call the cell stays empty until
+     * something asks for ECS and the reconciler's first tick lands five seconds later.
+     *
+     * <p>Every persisted ACTIVE service is named as pending first, then one reconciliation runs at
+     * once, which launches its tasks. {@link #pendingRestoredServices()} keeps naming a service
+     * until it has converged, which is what health answers on. The scheduled reconciler keeps
+     * running afterwards exactly as before.
+     */
+    public void restorePersistedRuntime() {
+        if (!storageInitialized) {
+            initializeStorage();
+        }
+        for (String accountId : reconcilableAccountIds()) {
+            RequestScopes.runAs(accountId, () -> {
+                try {
+                    for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
+                        EcsServiceModel svc = entry.getValue();
+                        if (svc == null || !"ACTIVE".equals(svc.getStatus()) || svc.getServiceName() == null) {
+                            continue;
+                        }
+                        restoredPending.put(svc.getServiceName(), "tasks 0 of " + svc.getDesiredCount());
+                    }
+                } catch (Exception e) {
+                    LOG.warnv(e, "Could not enumerate the persisted ECS services of account {0}: {1}",
+                            accountId, e.getMessage());
+                }
+            });
+        }
+        LOG.infov("Restoring the ECS runtime of {0} persisted service(s)", restoredPending.size());
+        reconcile();
+    }
+
+    /**
+     * The persisted services the restore is still waiting on, each with its reason: the pending
+     * target reason of a load-balanced service, or the task count it has against the count it
+     * wants. Empty once every restored service has converged, and empty when nothing was
+     * persisted, so a Floci with no service is healthy at once.
+     */
+    public Optional<Map<String, String>> pendingRestoredServices() {
+        if (restoredPending.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new LinkedHashMap<>(restoredPending));
+    }
+
+    /** Whether a restored service is still being waited on, so its gate is worth computing. */
+    private boolean isRestorePending(EcsServiceModel svc) {
+        return svc != null && svc.getServiceName() != null && restoredPending.containsKey(svc.getServiceName());
+    }
+
+    /**
+     * Records where a restored service stands: a null reason means it has converged and leaves the
+     * pending set, anything else keeps it in with that reason.
+     */
+    private void recordRestoreProgress(EcsServiceModel svc, String reason) {
+        if (!isRestorePending(svc)) {
+            return;
+        }
+        if (reason == null || reason.isBlank()) {
+            restoredPending.remove(svc.getServiceName());
+            return;
+        }
+        restoredPending.put(svc.getServiceName(), reason);
+    }
+
+    /**
+     * A restore that throws for one service keeps that service pending with the exception's
+     * message as its reason; the others are reconciled regardless.
+     */
+    private void recordRestoreFailure(EcsServiceModel svc, Exception failure) {
+        if (svc == null || svc.getServiceName() == null || !restoredPending.containsKey(svc.getServiceName())) {
+            return;
+        }
+        String message = failure.getMessage();
+        restoredPending.put(svc.getServiceName(),
+                message == null || message.isBlank() ? failure.toString() : message);
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference) {
@@ -1930,6 +2018,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
             try {
                 reconcileService(entry.getKey(), entry.getValue());
             } catch (Exception e) {
+                recordRestoreFailure(entry.getValue(), e);
                 LOG.debugv("Error reconciling ECS service {0}: {1}", entry.getKey(), e.getMessage());
             }
         }
@@ -1990,6 +2079,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
 
     private void reconcileService(String key, EcsServiceModel svc) {
         if (!"ACTIVE".equals(svc.getStatus())) {
+            recordRestoreProgress(svc, null);
             return;
         }
 
@@ -1998,6 +2088,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
 
         if (SCHEDULING_DAEMON.equals(svc.getSchedulingStrategy())) {
             reconcileDaemonService(key, svc, clusterName, region);
+            recordRestoreProgress(svc, null);
             return;
         }
 
@@ -2037,6 +2128,27 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
             converged = alreadyCompleted || (countsMet && pending == null);
         } else {
             converged = countsMet;
+        }
+
+        // The restore gate is proven from the tasks alone, never from lastCompletedDeploymentId: a
+        // service persisted as completed runs no task after a restart, so alreadyCompleted, which
+        // rightly keeps the deployment state completed, would otherwise report an empty cell as
+        // converged and let health answer 200 before a single task ran.
+        if (isRestorePending(svc)) {
+            String restoreReason;
+            if (!countsMet) {
+                restoreReason = "tasks " + current + " of " + svc.getDesiredCount();
+            } else if (gatesOnTargetHealth(svc)) {
+                restoreReason = runningTasks.stream()
+                        .filter(t -> !staleTasks.contains(t))
+                        .map(t -> lbRegistrar.pendingTargetReason(t, svc, region))
+                        .flatMap(java.util.Optional::stream)
+                        .findFirst()
+                        .orElse(null);
+            } else {
+                restoreReason = null;
+            }
+            recordRestoreProgress(svc, restoreReason);
         }
 
         if (converged) {

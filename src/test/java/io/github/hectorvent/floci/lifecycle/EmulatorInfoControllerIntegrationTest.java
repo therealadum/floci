@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.lifecycle;
 
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -10,6 +12,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -60,6 +64,36 @@ class EmulatorInfoControllerIntegrationTest {
         for (String service : CORE_SERVICES) {
             assertEquals("running", services.path(service).asText(),
                     "Service '" + service + "' must be running");
+        }
+    }
+
+    @Test
+    void health_answers503NamingThePendingRestoredServicesUntilTheyConverge() {
+        // A recreated Floci serves what its volume holds only once every persisted service has
+        // converged; until then the health check must not settle on healthy.
+        EcsService pendingEcs = org.mockito.Mockito.mock(EcsService.class);
+        org.mockito.Mockito.when(pendingEcs.pendingRestoredServices())
+                .thenReturn(Optional.of(Map.of("grafana", "tasks 0 of 1")));
+        QuarkusMock.installMockForType(pendingEcs, EcsService.class);
+
+        for (String path : List.of("/_floci/health", "/_localstack/health", "/health")) {
+            given()
+                .when().get(path)
+                .then()
+                    .statusCode(503)
+                    .contentType("application/json")
+                    .body("pending_services.grafana", equalTo("tasks 0 of 1"));
+        }
+
+        org.mockito.Mockito.when(pendingEcs.pendingRestoredServices()).thenReturn(Optional.empty());
+
+        for (String path : List.of("/_floci/health", "/_localstack/health", "/health")) {
+            given()
+                .when().get(path)
+                .then()
+                    .statusCode(200)
+                    .contentType("application/json")
+                    .body("edition", equalTo("community"));
         }
     }
 

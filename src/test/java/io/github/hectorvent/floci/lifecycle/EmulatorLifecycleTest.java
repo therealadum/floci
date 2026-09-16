@@ -79,6 +79,8 @@ class EmulatorLifecycleTest {
     @Mock private RdsService rdsService;
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
+    @Mock private EmulatorConfig.EcsServiceConfig ecsServiceConfig;
+    @Mock private io.github.hectorvent.floci.services.ecs.EcsService ecsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -107,6 +109,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elastiCacheServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elb()).thenReturn(elbServiceConfig);
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.ecs()).thenReturn(ecsServiceConfig);
+        Mockito.lenient().when(ecsServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
         Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.port()).thenReturn(4566);
@@ -118,7 +122,7 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, flinkContainerManager, rdsService, elbV2Service, elbClassicService,
+                rabbitMqManager, flinkContainerManager, rdsService, elbV2Service, elbClassicService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator);
@@ -178,6 +182,35 @@ class EmulatorLifecycleTest {
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
         Mockito.verify(elbV2Service, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should restore the ECS runtime after loading storage when ecs is enabled")
+    void shouldRestoreEcsPersistedRuntimeAfterStorageLoad() {
+        // A recreated container starts with the persisted services and no task: without this call
+        // nothing reaches the ECS bean until the first ECS request, so the cell stays empty.
+        stubStorageConfig();
+        when(ecsServiceConfig.enabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, ecsService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(ecsService).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should not restore the ECS runtime when ecs is disabled")
+    void shouldNotRestoreEcsPersistedRuntimeWhenDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        Mockito.verify(ecsService, Mockito.never()).restorePersistedRuntime();
     }
 
     @Test

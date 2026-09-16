@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -36,6 +37,7 @@ public class EmulatorInfoController {
     private final Instance<Resettable> resettables;
     private final FlociCertificateAuthority certificateAuthority;
     private final EmulatorConfig config;
+    private final EcsService ecsService;
 
     @Inject
     public EmulatorInfoController(ServiceRegistry serviceRegistry,
@@ -43,24 +45,35 @@ public class EmulatorInfoController {
                                   StorageFactory storageFactory,
                                   Instance<Resettable> resettables,
                                   FlociCertificateAuthority certificateAuthority,
-                                  EmulatorConfig config) {
+                                  EmulatorConfig config,
+                                  EcsService ecsService) {
         this.serviceRegistry = serviceRegistry;
         this.initLifecycleState = initLifecycleState;
         this.storageFactory = storageFactory;
         this.resettables = resettables;
         this.certificateAuthority = certificateAuthority;
         this.config = config;
+        this.ecsService = ecsService;
         this.version = resolveVersion();
     }
 
     @GET
     @Path("/health")
     public Response health() {
-        return Response.ok(Map.of(
-                "services", serviceRegistry.getServices(),
-                "edition", "community",
-                "original_edition", "floci-always-free",
-                "version", version)).build();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("services", serviceRegistry.getServices());
+        body.put("edition", "community");
+        body.put("original_edition", "floci-always-free");
+        body.put("version", version);
+        // A recreated emulator serves what its volume holds only once every persisted ECS service
+        // restored at start has converged. Until then this is 503 and names each service still
+        // pending with its reason, and the Docker health check settles on healthy only after.
+        Optional<Map<String, String>> pending = ecsService.pendingRestoredServices();
+        if (pending.isEmpty()) {
+            return Response.ok(body).build();
+        }
+        body.put("pending_services", pending.get());
+        return Response.status(Response.Status.SERVICE_UNAVAILABLE).entity(body).build();
     }
 
     @GET
