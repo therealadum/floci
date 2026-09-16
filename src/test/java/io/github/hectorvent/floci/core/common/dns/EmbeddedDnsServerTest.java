@@ -8,6 +8,7 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -302,6 +303,84 @@ class EmbeddedDnsServerTest {
         t.start();
     }
 
+    // ── respond — authoritative for every type under the suffix ───────────────
+
+    private static final int TYPE_A = 1;
+    private static final int TYPE_AAAA = 28;
+    private static final int TYPE_TXT = 16;
+    private static final int TYPE_MX = 15;
+
+    @Test
+    void respond_aQuestionForSuffixNameAnswersFlociAddress() {
+        byte[] query = buildQuery("x.localhost.floci.io", (short) 0x4242, TYPE_A);
+        byte[] response = dns.respond(query, "172.19.0.2").orElseThrow();
+        ByteBuffer resp = ByteBuffer.wrap(response);
+        assertEquals((short) 0x4242, resp.getShort(0));
+        assertEquals(1, resp.getShort(6), "one answer record");
+    }
+
+    @Test
+    void respond_aaaaQuestionForSuffixNameIsAuthoritativeWithNoAnswers() {
+        byte[] query = buildQuery("x.localhost.floci.io", (short) 0x1234, TYPE_AAAA);
+        byte[] response = dns.respond(query, "172.19.0.2").orElseThrow(
+                () -> new AssertionError("an AAAA question under the suffix must never be forwarded"));
+
+        ByteBuffer resp = ByteBuffer.wrap(response);
+        assertEquals((short) 0x1234, resp.getShort(0), "same transaction id");
+        short flags = resp.getShort(2);
+        assertTrue((flags & 0x8000) != 0, "QR bit must be set");
+        assertTrue((flags & 0x0400) != 0, "AA bit must be set");
+        assertTrue((flags & 0x0080) != 0, "RA bit as today");
+        assertEquals(0, flags & 0x000F, "RCODE must be NOERROR");
+        assertEquals(1, resp.getShort(4), "qdcount");
+        assertEquals(0, resp.getShort(6), "ancount must be zero");
+        assertEquals(0, resp.getShort(8), "nscount");
+        assertEquals(0, resp.getShort(10), "arcount");
+
+        // question echoed verbatim
+        assertEquals(query.length, response.length);
+        for (int i = 12; i < query.length; i++) {
+            assertEquals(query[i], response[i], "question byte " + i + " echoed");
+        }
+    }
+
+    @Test
+    void respond_txtQuestionForSuffixNameIsAuthoritativeWithNoAnswers() {
+        byte[] query = buildQuery("ingest.tempo.a.localhost.floci.io", (short) 7, TYPE_TXT);
+        byte[] response = dns.respond(query, "172.19.0.2").orElseThrow();
+        ByteBuffer resp = ByteBuffer.wrap(response);
+        assertEquals(0, resp.getShort(6), "ancount must be zero");
+        assertEquals(0, resp.getShort(2) & 0x000F, "RCODE must be NOERROR");
+    }
+
+    @Test
+    void respond_mxQuestionForSuffixNameIsAuthoritativeWithNoAnswers() {
+        byte[] query = buildQuery("x.localhost.floci.io", (short) 8, TYPE_MX);
+        byte[] response = dns.respond(query, "172.19.0.2").orElseThrow();
+        assertEquals(0, ByteBuffer.wrap(response).getShort(6), "ancount must be zero");
+    }
+
+    @Test
+    void respond_aaaaQuestionForEc2PrivateDnsNameIsAuthoritativeWithNoAnswers() {
+        byte[] query = buildQuery("ip-172-16-128-9.ec2.internal", (short) 9, TYPE_AAAA);
+        byte[] response = dns.respond(query, "172.19.0.2").orElseThrow();
+        assertEquals(0, ByteBuffer.wrap(response).getShort(6), "ancount must be zero");
+    }
+
+    @Test
+    void respond_aQuestionOutsideSuffixIsForwarded() {
+        byte[] query = buildQuery("business-api.tiktok.com", (short) 10, TYPE_A);
+        Optional<byte[]> response = dns.respond(query, "172.19.0.2");
+        assertTrue(response.isEmpty(), "a name outside the suffix is forwarded unchanged");
+    }
+
+    @Test
+    void respond_aaaaQuestionOutsideSuffixIsForwarded() {
+        byte[] query = buildQuery("business-api.tiktok.com", (short) 11, TYPE_AAAA);
+        Optional<byte[]> response = dns.respond(query, "172.19.0.2");
+        assertTrue(response.isEmpty(), "a name outside the suffix is forwarded unchanged");
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private byte[] encodeName(String name) {
@@ -319,6 +398,10 @@ class EmbeddedDnsServerTest {
     }
 
     private byte[] buildQuery(String name, short txId) {
+        return buildQuery(name, txId, 1);
+    }
+
+    private byte[] buildQuery(String name, short txId, int qtype) {
         byte[] encodedName = encodeName(name);
         // header(12) + name + type(2) + class(2)
         ByteBuffer buf = ByteBuffer.allocate(12 + encodedName.length + 4);
@@ -329,7 +412,7 @@ class EmbeddedDnsServerTest {
         buf.putShort((short) 0);
         buf.putShort((short) 0);
         buf.put(encodedName);
-        buf.putShort((short) 1); // type A
+        buf.putShort((short) qtype);
         buf.putShort((short) 1); // class IN
         return buf.array();
     }

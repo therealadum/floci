@@ -34,7 +34,12 @@ import java.util.regex.Pattern;
  * Docker network IP so virtual-hosted S3 URLs (my-bucket.floci:4566) work from
  * inside Lambda containers without requiring wildcard Docker aliases.
  *
- * All other queries are forwarded to the upstream resolvers read from /etc/resolv.conf
+ * The server is authoritative for every name under a suffix: a type A question answers Floci's
+ * address, and every other type answers NOERROR with no answer records. Such a question is never
+ * forwarded, so the public zone's AAAA answer of ::1 for localhost.floci.io can never send a
+ * client inside a container back to its own loopback.
+ *
+ * Queries for names outside the suffixes are forwarded to the upstream resolvers read from /etc/resolv.conf
  * (Docker's embedded DNS at 127.0.0.11), falling back to the configured public resolvers
  * (floci.dns.container-fallback-servers) so public hostnames still resolve when the
  * resolv.conf resolver does not answer.
@@ -48,6 +53,7 @@ public class EmbeddedDnsServer {
     private static final Logger LOG = Logger.getLogger(EmbeddedDnsServer.class);
     private static final int DNS_PORT = 53;
     private static final int TTL = 60;
+    private static final int TYPE_A = 1;
     private static final String FALLBACK_UPSTREAM = "127.0.0.11";
     // EDNS0-capable resolvers (Node/c-ares, glibc) advertise UDP payloads well above the
     // legacy 512-byte limit; CDN-backed public names return larger responses. Receiving into
@@ -117,34 +123,70 @@ public class EmbeddedDnsServer {
     private void handleQuery(Vertx vertx, DatagramSocket socket, byte[] data,
                              String senderHost, int senderPort, String myIp) {
         try {
-            ByteBuffer buf = ByteBuffer.wrap(data);
-            short txId = buf.getShort();
-            short flags = buf.getShort();
-            short qdCount = buf.getShort();
-            buf.getShort(); // ancount
-            buf.getShort(); // nscount
-            buf.getShort(); // arcount
-
-            if ((flags & 0x8000) != 0 || qdCount < 1) {
-                return; // not a standard query
+            if (!isStandardQuery(data)) {
+                return;
             }
-
-            int questionOffset = buf.position(); // always 12 for a standard query
-            String qname = readName(buf, data);
-            short qtype = buf.getShort();
-            buf.getShort(); // qclass
-            int questionEnd = buf.position();
-
-            Optional<String> resolvedAddress = qtype == 1 ? resolveARecord(qname, myIp) : Optional.empty();
-            if (resolvedAddress.isPresent()) {
-                byte[] response = buildAResponse(data, txId, questionOffset, questionEnd, resolvedAddress.get());
-                socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
+            Optional<byte[]> response = respond(data, myIp);
+            if (response.isPresent()) {
+                socket.send(Buffer.buffer(response.get()), senderPort, senderHost, v -> {});
             } else {
                 forwardAsync(vertx, socket, data, senderHost, senderPort);
             }
         } catch (Exception e) {
             LOG.debugv("DNS packet error: {0}", e.getMessage());
         }
+    }
+
+    /** True when the packet is a standard query carrying at least one question. */
+    boolean isStandardQuery(byte[] data) {
+        if (data.length < 12) {
+            return false;
+        }
+        ByteBuffer buf = ByteBuffer.wrap(data);
+        buf.getShort(); // txId
+        short flags = buf.getShort();
+        short qdCount = buf.getShort();
+        return (flags & 0x8000) == 0 && qdCount >= 1;
+    }
+
+    /**
+     * The answer this server owns, or empty when the question must be forwarded upstream.
+     *
+     * The server is authoritative for every name that matches a suffix or resolves as an EC2
+     * private DNS name, whatever the question type. A type A question answers the address. Every
+     * other type answers NOERROR with zero answer records, the way an authoritative server says
+     * the name exists but carries no record of that type. Such a question is never forwarded:
+     * the public zone answers AAAA for localhost.floci.io with ::1, which sends a client inside
+     * a container back to its own loopback instead of to Floci.
+     */
+    Optional<byte[]> respond(byte[] data, String myIp) {
+        ByteBuffer buf = ByteBuffer.wrap(data);
+        short txId = buf.getShort();
+        buf.getShort(); // flags
+        buf.getShort(); // qdcount
+        buf.getShort(); // ancount
+        buf.getShort(); // nscount
+        buf.getShort(); // arcount
+
+        int questionOffset = buf.position(); // always 12 for a standard query
+        String qname = readName(buf, data);
+        short qtype = buf.getShort();
+        buf.getShort(); // qclass
+        int questionEnd = buf.position();
+
+        if (qtype == TYPE_A) {
+            return resolveARecord(qname, myIp)
+                    .map(address -> buildAResponse(data, txId, questionOffset, questionEnd, address));
+        }
+        if (isAuthoritativeFor(qname)) {
+            return Optional.of(buildEmptyResponse(data, txId, questionOffset, questionEnd));
+        }
+        return Optional.empty();
+    }
+
+    /** True when this server owns the name, so no question about it is ever forwarded. */
+    boolean isAuthoritativeFor(String name) {
+        return matchesSuffix(name) || resolveEc2PrivateDnsName(name).isPresent();
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -248,6 +290,29 @@ public class EmbeddedDnsServer {
         for (String octet : ip.split("\\.")) {
             resp.put((byte) Integer.parseInt(octet));
         }
+
+        return resp.array();
+    }
+
+    /**
+     * An authoritative NOERROR response with the question echoed and no answer records: the name
+     * exists, but carries no record of the question's type. Same header style as
+     * {@link #buildAResponse}, with the AA bit set and ancount zero.
+     */
+    byte[] buildEmptyResponse(byte[] query, short txId, int questionOffset, int questionEnd) {
+        int questionLength = questionEnd - questionOffset;
+        ByteBuffer resp = ByteBuffer.allocate(12 + questionLength);
+
+        // header
+        resp.putShort(txId);
+        resp.putShort((short) 0x8580); // QR=1, AA=1, RD=1, RA=1, RCODE=0
+        resp.putShort((short) 1);      // qdcount
+        resp.putShort((short) 0);      // ancount
+        resp.putShort((short) 0);      // nscount
+        resp.putShort((short) 0);      // arcount
+
+        // question (copied verbatim from query)
+        resp.put(query, questionOffset, questionLength);
 
         return resp.array();
     }
