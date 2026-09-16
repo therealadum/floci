@@ -309,6 +309,26 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void createsTheNetworkWithTheConfiguredDockerLabels() {
+        // FLOCI_SERVICES_DOCKER_LABELS reaches the Docker network the same way it reaches
+        // containers and volumes, so a VPC network can be found by the run that made it.
+        when(config.services().docker().labels())
+                .thenReturn(Optional.of("mycellium.run=run-7,mycellium.module=infra/local/floci"));
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+        verify(docker.createNetworkCmd()).withLabels(labels.capture());
+        assertEquals("run-7", labels.getValue().get("mycellium.run"));
+        assertEquals("infra/local/floci", labels.getValue().get("mycellium.module"));
+        assertEquals("true", labels.getValue().get("floci"));
+    }
+
+    @Test
     void refusesToAttachAnAddressItDidNotPlan() {
         manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
         manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");

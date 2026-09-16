@@ -116,6 +116,53 @@ class ContainerStorageHelperTest {
     }
 
     @Test
+    void servicesDockerLabelsAreStampedOnEveryCreatedResource() {
+        // FLOCI_SERVICES_DOCKER_LABELS carries a comma separated list of key=value pairs; the
+        // platform passes the run id through it so every container, network, and volume the
+        // emulator creates through the mounted socket can be found again.
+        EmulatorConfig config = config("", java.util.List.of(),
+                "mycellium.run=run-7,mycellium.module=infra/local/floci");
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws",
+                        "mycellium.run", "run-7",
+                        "mycellium.module", "infra/local/floci"),
+                ContainerStorageHelper.defaultLabels(config));
+    }
+
+    @Test
+    void servicesDockerLabelsTolerateSpacingAndValuesContainingEquals() {
+        EmulatorConfig config = config("", java.util.List.of(),
+                "  mycellium.run = run-7 , kv=a=b ");
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws",
+                        "mycellium.run", "run-7", "kv", "a=b"),
+                ContainerStorageHelper.defaultLabels(config));
+    }
+
+    @Test
+    void blankAndMalformedServicesDockerLabelEntriesAreIgnored() {
+        EmulatorConfig config = config("", java.util.List.of(),
+                ",no-equals-sign, =dropped,kept=,");
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws", "kept", ""),
+                ContainerStorageHelper.defaultLabels(config));
+    }
+
+    @Test
+    void servicesDockerLabelsCannotOverrideReservedKeys() {
+        EmulatorConfig config = config(" run/one ", java.util.List.of(),
+                "floci=false,floci_emulator=spoofed,floci_namespace=spoofed,kept=yes");
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws",
+                        "floci_namespace", "run-one", "kept", "yes"),
+                ContainerStorageHelper.defaultLabels(config));
+    }
+
+    @Test
     void resourceIdentityLabelsCarryTheFullEmulatedResourceIdentity() {
         assertEquals(
                 Map.of("io.floci", "aws",
@@ -155,11 +202,25 @@ class ContainerStorageHelperTest {
 
     private static EmulatorConfig config(
             String namespace, java.util.List<EmulatorConfig.DockerConfig.LabelEntry> extraLabels) {
+        return config(namespace, extraLabels, "");
+    }
+
+    private static EmulatorConfig config(
+            String namespace,
+            java.util.List<EmulatorConfig.DockerConfig.LabelEntry> extraLabels,
+            String servicesDockerLabels) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
         EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ServicesDockerConfig servicesDocker =
+                mock(EmulatorConfig.ServicesDockerConfig.class);
         when(config.docker()).thenReturn(docker);
         when(config.storage()).thenReturn(storage);
+        when(config.services()).thenReturn(services);
+        when(services.docker()).thenReturn(servicesDocker);
+        when(servicesDocker.labels()).thenReturn(
+                servicesDockerLabels.isEmpty() ? Optional.empty() : Optional.of(servicesDockerLabels));
         when(docker.resourceNamespace()).thenReturn(namespace.isBlank() ? Optional.empty() : Optional.of(namespace));
         when(docker.extraLabels()).thenReturn(extraLabels);
         when(storage.hostPersistentPath()).thenReturn("/tmp/floci");

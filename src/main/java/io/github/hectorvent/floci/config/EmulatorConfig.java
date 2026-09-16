@@ -753,6 +753,24 @@ public interface EmulatorConfig {
         EfsServiceConfig efs();
         CodeGuruReviewerServiceConfig codegurureviewer();
         MarketplaceServiceConfig marketplace();
+
+        /** Docker settings the emulator applies to every resource it creates for a service. */
+        ServicesDockerConfig docker();
+    }
+
+    /**
+     * Docker settings shared by every service that creates Docker resources.
+     */
+    interface ServicesDockerConfig {
+        /**
+         * Labels stamped on every container, network, and volume the emulator creates, as a
+         * comma separated list of {@code key=value} pairs, e.g.
+         * {@code FLOCI_SERVICES_DOCKER_LABELS=owner.run=run-7,owner.module=infra}. Empty by
+         * default. Entries without a {@code =} or with a blank key are ignored, as are the
+         * label keys the emulator reserves for its own discovery and pruning
+         * ({@code floci}, {@code floci_emulator}, {@code floci_namespace}).
+         */
+        Optional<String> labels();
     }
 
     interface ConnectServiceConfig {

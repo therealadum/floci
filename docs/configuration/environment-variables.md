@@ -95,6 +95,7 @@ See [Storage Modes](./storage.md) for a full explanation of each mode.
 | `FLOCI_DOCKER_RESOURCE_NAMESPACE` | _(none)_ | Optional namespace prefix for managed child Docker container and volume names |
 | `FLOCI_DOCKER_EXTRA_LABELS_0__KEY` | _(none)_ | Label key for extra-label entry 0, applied to every Floci-created container and volume (increment the index for more) |
 | `FLOCI_DOCKER_EXTRA_LABELS_0__VALUE` | _(none)_ | Label value for extra-label entry 0 |
+| `FLOCI_SERVICES_DOCKER_LABELS` | _(none)_ | Comma separated `key=value` pairs stamped on every container, network, and volume Floci creates (reserved keys `floci`, `floci_emulator`, `floci_namespace` are ignored) |
 
 ### Registry credentials
 

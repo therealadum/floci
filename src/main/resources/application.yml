@@ -254,6 +254,10 @@ floci:
     #     value: dev
 
   services:
+    # docker:
+    #   labels: ""                    # FLOCI_SERVICES_DOCKER_LABELS; comma separated key=value pairs
+    #                                 #   stamped on every container, network, and volume Floci creates
+    #                                 #   (reserved keys floci, floci_emulator, floci_namespace are ignored)
     ssm:
       enabled: true
       max-parameter-history: 5

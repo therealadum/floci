@@ -66,6 +66,12 @@ class ContainerLifecycleManagerLabelsTest {
     @Mock
     EmulatorConfig.TlsConfig tlsConfig;
 
+    @Mock
+    EmulatorConfig.ServicesConfig servicesConfig;
+
+    @Mock
+    EmulatorConfig.ServicesDockerConfig servicesDockerConfig;
+
     @BeforeEach
     void setUp() {
         lenient().when(config.docker()).thenReturn(dockerConfig);
@@ -149,6 +155,40 @@ class ContainerLifecycleManagerLabelsTest {
     }
 
     @Test
+    void createStampsTheConfiguredDockerLabelsOnEveryContainer() {
+        // floci.services.docker.labels, read from the environment as
+        // FLOCI_SERVICES_DOCKER_LABELS, reaches every container through this one choke point.
+        stubConfiguredLabels("mycellium.run=run-7,mycellium.module=infra/local/floci");
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(new ContainerSpec("busybox:stable"));
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws",
+                        "mycellium.run", "run-7",
+                        "mycellium.module", "infra/local/floci"),
+                capturedLabels(createCmd));
+    }
+
+    @Test
+    void ensureVolumeStampsTheConfiguredDockerLabels() {
+        stubConfiguredLabels("mycellium.run=run-7");
+        InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("volume-1")).thenReturn(inspectVolumeCmd);
+        when(inspectVolumeCmd.exec()).thenThrow(new NotFoundException("missing"));
+        CreateVolumeCmd createVolumeCmd = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(createVolumeCmd);
+
+        manager().ensureVolume("volume-1");
+
+        ArgumentCaptor<Map<String, String>> labels = labelsCaptor();
+        verify(createVolumeCmd).withLabels(labels.capture());
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws", "mycellium.run", "run-7"),
+                labels.getValue());
+    }
+
+    @Test
     void ensureVolumeAppliesTheSameDefaultLabels() {
         InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
         when(dockerClient.inspectVolumeCmd("volume-1")).thenReturn(inspectVolumeCmd);
@@ -187,6 +227,12 @@ class ContainerLifecycleManagerLabelsTest {
         assertEquals(
                 Map.of("floci", "true", "floci_emulator", "floci-aws"),
                 capturedLabels(createCmd));
+    }
+
+    private void stubConfiguredLabels(String labels) {
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.docker()).thenReturn(servicesDockerConfig);
+        when(servicesDockerConfig.labels()).thenReturn(Optional.of(labels));
     }
 
     private ContainerLifecycleManager manager() {

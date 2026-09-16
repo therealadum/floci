@@ -76,15 +76,17 @@ public final class ContainerStorageHelper {
             java.util.Set.of("floci", "floci_emulator", "floci_namespace");
 
     /**
-     * Labels applied to every emulator-created container and volume:
+     * Labels applied to every emulator-created container, network, and volume:
      * {@code floci=true} (umbrella across all Floci emulators),
      * {@code floci_emulator=floci-aws} (per-emulator discriminator), and
      * {@code floci_namespace} when a resource namespace is configured.
-     * User-configured {@code floci.docker.extra-labels} entries are included first;
+     * User-configured {@code floci.docker.extra-labels} entries and the
+     * {@code floci.services.docker.labels} pairs are included first;
      * reserved keys always win on conflict.
      */
     public static Map<String, String> defaultLabels(EmulatorConfig config) {
         Map<String, String> labels = new LinkedHashMap<>();
+        putConfiguredLabels(labels, servicesDockerLabels(config));
         if (config != null && config.docker() != null && config.docker().extraLabels() != null) {
             for (EmulatorConfig.DockerConfig.LabelEntry entry : config.docker().extraLabels()) {
                 String key = entry.key() == null ? "" : entry.key().trim();
@@ -103,6 +105,40 @@ public final class ContainerStorageHelper {
             labels.put("floci_namespace", namespace);
         }
         return labels;
+    }
+
+    /**
+     * Parses {@code floci.services.docker.labels} — a comma separated list of {@code key=value}
+     * pairs, read from the environment as {@code FLOCI_SERVICES_DOCKER_LABELS} — into the label
+     * map. An entry without a {@code =}, with a blank key, or with a reserved key is ignored;
+     * the first {@code =} separates key from value, so a value may itself contain one.
+     */
+    private static void putConfiguredLabels(Map<String, String> labels, String configured) {
+        if (configured == null || configured.isBlank()) {
+            return;
+        }
+        for (String entry : configured.split(",")) {
+            int separator = entry.indexOf('=');
+            if (separator < 0) {
+                LOG.warnv("Ignoring Docker label without a \"=\": \"{0}\"", entry.trim());
+                continue;
+            }
+            String key = entry.substring(0, separator).trim();
+            if (key.isEmpty() || RESERVED_LABEL_KEYS.contains(key)) {
+                LOG.warnv("Ignoring Docker label with {0} key: \"{1}\"",
+                        key.isEmpty() ? "blank" : "reserved", key);
+                continue;
+            }
+            labels.put(key, entry.substring(separator + 1).trim());
+        }
+    }
+
+    private static String servicesDockerLabels(EmulatorConfig config) {
+        if (config == null || config.services() == null || config.services().docker() == null
+                || config.services().docker().labels() == null) {
+            return "";
+        }
+        return config.services().docker().labels().orElse("");
     }
 
     /**
