@@ -13,8 +13,10 @@ import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuil
 import org.apache.hc.client5.http.impl.routing.DefaultRoutePlanner;
 import org.apache.hc.client5.http.protocol.HttpClientContext;
 import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
+import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpVersion;
+import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.hc.core5.http2.HttpVersionPolicy;
@@ -118,6 +120,17 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     HttpResponse<byte[]> send(HttpRequest request, Map<String, String> originHeaders,
                               HttpResponse.BodyHandler<byte[]> bodyHandler)
             throws IOException, InterruptedException {
+        return send(request, originHeaders, null, null, bodyHandler);
+    }
+
+    /**
+     * Sends a request whose viewer body, when present, is forwarded to the origin as the request
+     * entity. The body travels beside the request because the request itself carries no publisher.
+     */
+    HttpResponse<byte[]> send(HttpRequest request, Map<String, String> originHeaders,
+                              byte[] requestBody, String contentType,
+                              HttpResponse.BodyHandler<byte[]> bodyHandler)
+            throws IOException, InterruptedException {
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedException("CloudFront origin request interrupted");
         }
@@ -131,6 +144,9 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         request.headers().map().forEach((name, values) ->
                 values.forEach(value -> builder.addHeader(name, value)));
         originHeaders.forEach(builder::setHeader);
+        if (requestBody != null && requestBody.length > 0) {
+            builder.setEntity(new ByteArrayEntity(requestBody, parseContentType(contentType)));
+        }
 
         HttpClientContext context = HttpClientContext.create();
         Duration responseTimeout = request.timeout().orElse(RESPONSE_TIMEOUT);
@@ -162,6 +178,17 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 throw new InterruptedException("CloudFront origin request interrupted");
             }
             throw e;
+        }
+    }
+
+    private static ContentType parseContentType(String contentType) {
+        if (contentType == null || contentType.isBlank()) {
+            return null;
+        }
+        try {
+            return ContentType.parse(contentType);
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 

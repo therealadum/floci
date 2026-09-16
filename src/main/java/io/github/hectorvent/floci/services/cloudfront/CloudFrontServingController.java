@@ -11,9 +11,13 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HEAD;
 import jakarta.ws.rs.OPTIONS;
+import jakarta.ws.rs.PATCH;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.core.Context;
@@ -60,7 +64,8 @@ import java.util.Set;
  * </ul>
  *
  * <p>Viewer-protocol-policy enforcement is intentionally out of scope for this layer: the emulator
- * is HTTP-first. GET/HEAD are served, and OPTIONS is served only when the matched behavior allows it.
+ * is HTTP-first. Every viewer method the matched cache behavior's {@code AllowedMethods} declares is
+ * served; any other method answers 405 with an {@code Allow} header naming the allowed ones.
  */
 @Path("/_cloudfront/{distId}")
 public class CloudFrontServingController {
@@ -110,44 +115,69 @@ public class CloudFrontServingController {
     @Path("/{proxy:.*}")
     public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                         @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        var request = currentVertxRequest.getCurrent().request();
-        String rawViewerPath = rawViewerPath(request.uri());
-        return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
-                uriInfo.getRequestUri().getScheme(),
-                headers.getHeaderString("Host"),
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION),
-                request.getHeader("Origin"), "GET", null, null,
-                request.getHeader("Pragma"));
+        return serve(distId, headers, uriInfo, "GET", null);
     }
 
     @HEAD
     @Path("/{proxy:.*}")
     public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                          @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        var request = currentVertxRequest.getCurrent().request();
-        String rawViewerPath = rawViewerPath(request.uri());
-        return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
-                uriInfo.getRequestUri().getScheme(),
-                headers.getHeaderString("Host"),
-                headers.getHeaderString(HttpHeaders.AUTHORIZATION),
-                request.getHeader("Origin"), "HEAD", null, null,
-                request.getHeader("Pragma"));
+        return serve(distId, headers, uriInfo, "HEAD", null);
     }
 
     @OPTIONS
     @Path("/{proxy:.*}")
     public Response options(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                             @Context HttpHeaders headers, @Context UriInfo uriInfo) {
+        return serve(distId, headers, uriInfo, "OPTIONS", null);
+    }
+
+    @POST
+    @Path("/{proxy:.*}")
+    public Response post(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                         @Context HttpHeaders headers, @Context UriInfo uriInfo, byte[] body) {
+        return serve(distId, headers, uriInfo, "POST", body);
+    }
+
+    @PUT
+    @Path("/{proxy:.*}")
+    public Response put(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                        @Context HttpHeaders headers, @Context UriInfo uriInfo, byte[] body) {
+        return serve(distId, headers, uriInfo, "PUT", body);
+    }
+
+    @PATCH
+    @Path("/{proxy:.*}")
+    public Response patch(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                          @Context HttpHeaders headers, @Context UriInfo uriInfo, byte[] body) {
+        return serve(distId, headers, uriInfo, "PATCH", body);
+    }
+
+    @DELETE
+    @Path("/{proxy:.*}")
+    public Response delete(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
+                           @Context HttpHeaders headers, @Context UriInfo uriInfo, byte[] body) {
+        return serve(distId, headers, uriInfo, "DELETE", body);
+    }
+
+    /**
+     * Reads the viewer request behind a handler and serves it. Every method a cache behavior's
+     * AllowedMethods declares reaches the origin through this one path.
+     */
+    private Response serve(String distId, HttpHeaders headers, UriInfo uriInfo,
+                           String method, byte[] body) {
         var request = currentVertxRequest.getCurrent().request();
         String rawViewerPath = rawViewerPath(request.uri());
+        boolean preflight = "OPTIONS".equals(method);
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
                 headers.getHeaderString("Host"),
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION),
-                request.getHeader("Origin"), "OPTIONS",
-                request.getHeader("Access-Control-Request-Method"),
-                request.getHeader("Access-Control-Request-Headers"),
-                request.getHeader("Pragma"));
+                request.getHeader("Origin"), method,
+                preflight ? request.getHeader("Access-Control-Request-Method") : null,
+                preflight ? request.getHeader("Access-Control-Request-Headers") : null,
+                request.getHeader("Pragma"),
+                body, request.getHeader(HttpHeaders.CONTENT_TYPE));
     }
 
     private Response serve(String distId, String rawViewerPath, String decodedViewerPath,
@@ -156,7 +186,8 @@ public class CloudFrontServingController {
                            String viewerOrigin, String method,
                            String accessControlRequestMethod,
                            String accessControlRequestHeaders,
-                           String pragma) {
+                           String pragma,
+                           byte[] body, String viewerContentType) {
         boolean includeBody = !"HEAD".equals(method);
         boolean preflightRequest = "OPTIONS".equals(method)
                 && viewerOrigin != null && !viewerOrigin.isBlank()
@@ -175,8 +206,15 @@ public class CloudFrontServingController {
 
         String normalized = CloudFrontRequestRouter.normalizePath(decodedViewerPath);
 
-        if (!CloudFrontRequestRouter.matchAllowedMethods(config, normalized).contains(method)) {
-            return textError(403, "Invalid method.");
+        // A method the matched behavior does not allow never reaches an origin; the Allow header
+        // names the methods that behavior does declare.
+        List<String> allowedMethods = CloudFrontRequestRouter.matchAllowedMethods(config, normalized);
+        if (!allowedMethods.contains(method)) {
+            return Response.status(405)
+                    .type(MediaType.TEXT_PLAIN)
+                    .header(HttpHeaders.ALLOW, String.join(", ", allowedMethods))
+                    .entity("Invalid method.")
+                    .build();
         }
 
         // The response-headers policy of the behavior that matches the request applies to the final
@@ -199,7 +237,8 @@ public class CloudFrontServingController {
 
         OriginResponse origin = route(dist, normalized, rawViewerPath, decodedViewerPath,
                 viewerScheme, viewerAuthorization, method, viewerOrigin,
-                accessControlRequestMethod, accessControlRequestHeaders);
+                accessControlRequestMethod, accessControlRequestHeaders,
+                body, viewerContentType);
 
         if (origin.status() >= 400) {
             Response fallback = applyCustomError(
@@ -345,7 +384,8 @@ public class CloudFrontServingController {
                                  String viewerScheme, String viewerAuthorization,
                                  String method, String viewerOrigin,
                                  String accessControlRequestMethod,
-                                 String accessControlRequestHeaders) {
+                                 String accessControlRequestHeaders,
+                                 byte[] body, String viewerContentType) {
         DistributionConfig config = distribution.getConfig();
         String originId = CloudFrontRequestRouter.matchTargetOriginId(config, normalized);
         Origin origin = CloudFrontRequestRouter.findOrigin(config, originId);
@@ -356,6 +396,10 @@ public class CloudFrontServingController {
             if ("OPTIONS".equals(method)) {
                 return fetchS3Preflight(origin, viewerOrigin, accessControlRequestMethod,
                         accessControlRequestHeaders);
+            }
+            // An S3 origin serves reads only, whatever the behavior allows.
+            if (!"GET".equals(method) && !"HEAD".equals(method)) {
+                return OriginResponse.error(405, "Invalid method.");
             }
             String key = CloudFrontRequestRouter.resolveOriginKey(
                     origin.getOriginPath(), decodedViewerPath, config.getDefaultRootObject());
@@ -368,7 +412,8 @@ public class CloudFrontServingController {
         // origin request policy, or legacy ForwardedValues configuration. Those policy
         // semantics are not modeled in the data plane yet, so the AWS default is to omit them.
         return fetchFromCustomOrigin(origin, forwardUri, null, viewerScheme, method,
-                viewerOrigin, accessControlRequestMethod, accessControlRequestHeaders);
+                viewerOrigin, accessControlRequestMethod, accessControlRequestHeaders,
+                body, viewerContentType);
     }
 
     private OriginResponse fetchFromS3(
@@ -494,7 +539,8 @@ public class CloudFrontServingController {
     private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri, String rawQuery,
                                                  String viewerScheme, String method, String viewerOrigin,
                                                  String accessControlRequestMethod,
-                                                 String accessControlRequestHeaders) {
+                                                 String accessControlRequestHeaders,
+                                                 byte[] viewerBody, String viewerContentType) {
         boolean includeBody = !"HEAD".equals(method);
         try {
             URI target = buildCustomOriginUri(
@@ -523,7 +569,8 @@ public class CloudFrontServingController {
                 addRequestHeader(rb, "Access-Control-Request-Headers", accessControlRequestHeaders);
             }
             HttpResponse<byte[]> resp = httpClient.send(
-                    rb.build(), originHeaders, HttpResponse.BodyHandlers.ofByteArray());
+                    rb.build(), originHeaders, viewerBody, viewerContentType,
+                    HttpResponse.BodyHandlers.ofByteArray());
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             byte[] body = resp.body() != null ? resp.body() : new byte[0];
             long contentLength = includeBody ? body.length : responseContentLength(resp);
@@ -761,7 +808,7 @@ public class CloudFrontServingController {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
             page = fetchFromCustomOrigin(
                     errOrigin, forwardUri, null, viewerScheme,
-                    includeBody ? "GET" : "HEAD", null, null, null);
+                    includeBody ? "GET" : "HEAD", null, null, null, null, null);
         }
         if (page.status() >= 400) {
             // Custom error page unavailable → return the status received from the error-page origin

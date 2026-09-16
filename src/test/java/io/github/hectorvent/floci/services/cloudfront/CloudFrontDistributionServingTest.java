@@ -1413,7 +1413,8 @@ class CloudFrontDistributionServingTest {
                 .header("Origin", "https://viewer.example")
                 .header("Access-Control-Request-Method", "GET")
                 .when().options("/api/resource")
-                .then().statusCode(403)
+                .then().statusCode(405)
+                .header("Allow", equalTo("GET, HEAD"))
                 .body(equalTo("Invalid method."));
 
         given()

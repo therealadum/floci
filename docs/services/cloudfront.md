@@ -146,11 +146,16 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 - CNAME aliases are globally unique. `AssociateAlias` atomically transfers an alias from its current
   owner to the target distribution. Exact aliases take precedence over the most-specific matching
   wildcard alias.
-- Viewer GET/HEAD requests, and OPTIONS requests allowed by the matched cache behavior, addressed to
-  an enabled distribution's generated domain or alias are routed to the matching S3 or custom
-  origin. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
+- Viewer requests addressed to an enabled distribution's generated domain or alias are routed to the
+  matching S3 or custom origin when the matched cache behavior's `AllowedMethods` declares the
+  method: `GET`, `HEAD`, `OPTIONS`, `PUT`, `POST`, `PATCH`, and `DELETE`. A body-bearing method
+  forwards its body and `Content-Type` to a custom origin, and the origin's status, headers, and body
+  are returned. An S3 origin serves `GET`, `HEAD`, and `OPTIONS` only; any other method against one
+  returns 405. A method the matched behavior does not allow returns 405 with an `Allow` header
+  listing the methods it does allow. Origin forwarding preserves the raw path; custom-origin
+  redirects are not followed.
 - Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
-  same-named viewer headers on custom-origin GET/HEAD/OPTIONS requests. For in-process S3 origins, a
+  same-named viewer headers on every custom-origin request. For in-process S3 origins, a
   configured `Origin` header is used for S3 CORS evaluation. AWS-prohibited names, malformed
   values, inconsistent quantities, duplicates, and quota violations are rejected with modeled
   CloudFront errors when the distribution is created or updated.
