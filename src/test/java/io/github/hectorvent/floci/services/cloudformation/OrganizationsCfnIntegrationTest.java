@@ -44,7 +44,7 @@ class OrganizationsCfnIntegrationTest {
     private static final String ORGANIZATIONS_TARGET = "AWSOrganizationsV20161128.";
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
 
-    private static final String TEMPLATE = """
+    private static final String TEMPLATE_BODY = """
         {
           "Resources": {
             "Org": {
@@ -67,19 +67,6 @@ class OrganizationsCfnIntegrationTest {
                 "ParentIds": [ { "Ref": "Workloads" } ]
               }
             },
-            "Scp": {
-              "Type": "AWS::Organizations::Policy",
-              "Properties": {
-                "Name": "CfnDenyEc2",
-                "Type": "SERVICE_CONTROL_POLICY",
-                "Description": "Deny EC2",
-                "Content": {
-                  "Version": "2012-10-17",
-                  "Statement": [ { "Effect": "Deny", "Action": "ec2:*", "Resource": "*" } ]
-                },
-                "TargetIds": [ { "Ref": "Workloads" } ]
-              }
-            },
             "Rp": {
               "Type": "AWS::Organizations::ResourcePolicy",
               "Properties": {
@@ -93,7 +80,7 @@ class OrganizationsCfnIntegrationTest {
                   } ]
                 }
               }
-            }
+            }%s
           },
           "Outputs": {
             "OrgId":          { "Value": { "Fn::GetAtt": ["Org", "Id"] } },
@@ -115,14 +102,42 @@ class OrganizationsCfnIntegrationTest {
             "AccountPath0":   { "Value": { "Fn::Select": [0, { "Fn::GetAtt": ["Dev", "Paths"] }] } },
             "AccountJoined":  { "Value": { "Fn::GetAtt": ["Dev", "JoinedMethod"] } },
             "AccountJoinedAt":{ "Value": { "Fn::GetAtt": ["Dev", "JoinedTimestamp"] } },
-            "PolicyId":       { "Value": { "Fn::GetAtt": ["Scp", "Id"] } },
-            "PolicyArn":      { "Value": { "Fn::GetAtt": ["Scp", "Arn"] } },
-            "PolicyAwsManaged": { "Value": { "Fn::GetAtt": ["Scp", "AwsManaged"] } },
             "ResourcePolicyId":  { "Value": { "Fn::GetAtt": ["Rp", "Id"] } },
-            "ResourcePolicyArn": { "Value": { "Fn::GetAtt": ["Rp", "Arn"] } }
+            "ResourcePolicyArn": { "Value": { "Fn::GetAtt": ["Rp", "Arn"] } }%s
           }
         }
         """;
+
+    /**
+     * The service control policy is a second step rather than part of the first template: a root
+     * starts with no policy type enabled, and a policy of a type that is not enabled on the root
+     * cannot be created, so the stack grows the policy once EnablePolicyType has run.
+     */
+    private static final String SCP_RESOURCE = """
+        ,
+            "Scp": {
+              "Type": "AWS::Organizations::Policy",
+              "Properties": {
+                "Name": "CfnDenyEc2",
+                "Type": "SERVICE_CONTROL_POLICY",
+                "Description": "Deny EC2",
+                "Content": {
+                  "Version": "2012-10-17",
+                  "Statement": [ { "Effect": "Deny", "Action": "ec2:*", "Resource": "*" } ]
+                },
+                "TargetIds": [ { "Ref": "Workloads" } ]
+              }
+            }""";
+
+    private static final String SCP_OUTPUTS = """
+        ,
+            "PolicyId":       { "Value": { "Fn::GetAtt": ["Scp", "Id"] } },
+            "PolicyArn":      { "Value": { "Fn::GetAtt": ["Scp", "Arn"] } },
+            "PolicyAwsManaged": { "Value": { "Fn::GetAtt": ["Scp", "AwsManaged"] } }""";
+
+    private static final String TEMPLATE_WITHOUT_POLICY = TEMPLATE_BODY.formatted("", "");
+
+    private static final String TEMPLATE = TEMPLATE_BODY.formatted(SCP_RESOURCE, SCP_OUTPUTS);
 
     private String organizationId;
     private String rootId;
@@ -181,13 +196,30 @@ class OrganizationsCfnIntegrationTest {
     @Test
     @Order(1)
     void createStackProvisionsEveryOrganizationsResourceType() {
-        cloudFormation("CreateStack", "StackName", STACK_NAME, "TemplateBody", TEMPLATE)
+        cloudFormation("CreateStack", "StackName", STACK_NAME, "TemplateBody", TEMPLATE_WITHOUT_POLICY)
                 .then().statusCode(200);
         awaitStackStatus("CREATE_COMPLETE");
     }
 
     @Test
     @Order(2)
+    void updateStackAddsThePolicyOnceItsPolicyTypeIsEnabled() {
+        String root = output(describeStacks(), "RootId");
+
+        // The organization the stack created has no policy type enabled on its root, so a
+        // SERVICE_CONTROL_POLICY cannot be created yet.
+        organizations("EnablePolicyType",
+                "{\"RootId\":\"" + root + "\",\"PolicyType\":\"SERVICE_CONTROL_POLICY\"}")
+                .then().statusCode(200)
+                .body("Root.PolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"));
+
+        cloudFormation("UpdateStack", "StackName", STACK_NAME, "TemplateBody", TEMPLATE)
+                .then().statusCode(200);
+        awaitStackStatus("UPDATE_COMPLETE");
+    }
+
+    @Test
+    @Order(3)
     void organizationAttributesResolve() {
         Response stacks = describeStacks();
 
@@ -208,7 +240,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(4)
     void organizationalUnitAttributesResolveAndRefIsTheOuId() {
         Response stacks = describeStacks();
         ouId = output(stacks, "OuId");
@@ -223,7 +255,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void accountAttributesResolve() {
         Response stacks = describeStacks();
         memberAccountId = output(stacks, "AccountId");
@@ -246,7 +278,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void policyAndResourcePolicyAttributesResolve() {
         Response stacks = describeStacks();
         policyId = output(stacks, "PolicyId");
@@ -263,7 +295,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void theProvisionedResourcesAreRealAndWiredTogether() {
         organizations("DescribeOrganization", "{}")
                 .then().statusCode(200)
@@ -293,7 +325,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void updateStackRenamesInPlaceRatherThanRecreating() {
         String updated = TEMPLATE.replace("\"Name\": \"Workloads\"", "\"Name\": \"Renamed\"");
 
@@ -314,7 +346,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void deleteStackTearsTheOrganizationDown() {
         cloudFormation("DeleteStack", "StackName", STACK_NAME).then().statusCode(200);
 
@@ -327,7 +359,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void theManagementAccountIsFreeToStartOver() {
         // The teardown must leave no organization behind for this account, otherwise a second
         // stack — or a re-run of this test class — would hit AlreadyInOrganizationException.

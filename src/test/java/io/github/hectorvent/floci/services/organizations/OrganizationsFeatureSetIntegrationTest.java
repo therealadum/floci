@@ -94,7 +94,9 @@ class OrganizationsFeatureSetIntegrationTest {
         .then()
             .statusCode(200)
             .body("Organization.FeatureSet", equalTo("ALL"))
-            .body("Organization.AvailablePolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"));
+            // Promotion makes the access-control policy types available; enabling one on the root
+            // is still EnablePolicyType's job.
+            .body("Organization.AvailablePolicyTypes", empty());
     }
 
     @Test
@@ -111,6 +113,14 @@ class OrganizationsFeatureSetIntegrationTest {
     @Test
     @Order(5)
     void policyTypesCanBeEnabledAfterUpgrading() {
+        organizations("EnablePolicyType",
+                "{\"RootId\":\"" + rootId + "\",\"PolicyType\":\"SERVICE_CONTROL_POLICY\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Root.PolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"));
+
         organizations("EnablePolicyType", "{\"RootId\":\"" + rootId + "\",\"PolicyType\":\"BACKUP_POLICY\"}")
         .when()
             .post("/")

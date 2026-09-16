@@ -67,7 +67,22 @@ class OrganizationsSameCallerIntegrationTest {
             .statusCode(200)
             .body("Organization.MasterAccountId", equalTo(MANAGEMENT_ACCOUNT));
 
-        organizations("CreatePolicy", "{\"Name\":\"deny-leave\",\"Type\":\"SERVICE_CONTROL_POLICY\","
+        // A new root has no policy type enabled, so service control policies are enabled first.
+        String rootId = organizations("ListRoots", "{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Roots[0].Id");
+
+        organizations("EnablePolicyType",
+                "{\"RootId\":\"" + rootId + "\",\"PolicyType\":\"SERVICE_CONTROL_POLICY\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        organizations("CreatePolicy","{\"Name\":\"deny-leave\",\"Type\":\"SERVICE_CONTROL_POLICY\","
                 + "\"Description\":\"deny leave\",\"Content\":" + quoted(SCP_CONTENT) + "}")
         .when()
             .post("/")

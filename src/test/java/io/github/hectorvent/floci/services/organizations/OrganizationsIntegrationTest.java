@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
@@ -79,7 +80,8 @@ class OrganizationsIntegrationTest {
             .body("Organization.FeatureSet", equalTo("ALL"))
             .body("Organization.MasterAccountId", equalTo("000000000000"))
             .body("Organization.MasterAccountArn", startsWith("arn:aws:organizations::000000000000:account/o-"))
-            .body("Organization.AvailablePolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"))
+            // A new organization has no policy type enabled on its root, whatever its feature set.
+            .body("Organization.AvailablePolicyTypes", empty())
             .extract().jsonPath().getString("Organization.Id");
     }
 
@@ -108,7 +110,7 @@ class OrganizationsIntegrationTest {
 
     @Test
     @Order(4)
-    void listRootsReturnsRootWithServiceControlPolicyEnabled() {
+    void listRootsReturnsRootWithNoPolicyTypeEnabled() {
         rootId = organizations("ListRoots", "{}")
         .when()
             .post("/")
@@ -118,9 +120,30 @@ class OrganizationsIntegrationTest {
             .body("Roots[0].Id", matchesPattern("r-[a-z0-9]{4}"))
             .body("Roots[0].Name", equalTo("Root"))
             .body("Roots[0].Arn", startsWith("arn:aws:organizations::000000000000:root/" + organizationId))
-            .body("Roots[0].PolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"))
-            .body("Roots[0].PolicyTypes.Status", hasItem("ENABLED"))
+            .body("Roots[0].PolicyTypes", empty())
             .extract().jsonPath().getString("Roots[0].Id");
+    }
+
+    @Test
+    @Order(6)
+    void enablePolicyTypeEnablesServiceControlPoliciesOnTheRoot() {
+        organizations("EnablePolicyType",
+                "{\"RootId\":\"" + rootId + "\",\"PolicyType\":\"SERVICE_CONTROL_POLICY\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Root.PolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"))
+            .body("Root.PolicyTypes.Status", hasItem("ENABLED"));
+
+        // What EnablePolicyType set is what ListRoots reports.
+        organizations("ListRoots", "{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Roots[0].PolicyTypes.Type", contains("SERVICE_CONTROL_POLICY"))
+            .body("Roots[0].PolicyTypes.Status", contains("ENABLED"));
     }
 
     @Test

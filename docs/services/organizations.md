@@ -36,8 +36,15 @@ call `LeaveOrganization`. An account in no organization gets
 - The AWS-managed `p-FullAWSAccess` SCP is created with the organization and attached to the
   root, every new OU and every new account. Detaching the last service control policy from a
   target is rejected with `ConstraintViolationException`, as on AWS.
-- A `CONSOLIDATED_BILLING` organization has no available policy types. `EnableAllFeatures`
-  promotes it to `ALL`; with no member accounts the handshake completes immediately. With member
+- A new root has no policy type enabled, whatever the feature set. `EnablePolicyType` and
+  `DisablePolicyType` are the only writers of that list, so `ListRoots` reports exactly what they
+  set, and a policy of a type that is not enabled on the root can be neither created nor attached.
+  A `CONSOLIDATED_BILLING` organization cannot enable one at all.
+- `DeleteOrganization` takes the whole organization with it: its root and the policy types enabled
+  on that root, its policies and their attachments, its member accounts, its handshakes and its
+  create-account statuses. Nothing survives for the next `CreateOrganization` to inherit.
+- `EnableAllFeatures` promotes a `CONSOLIDATED_BILLING` organization to
+  `ALL`; with no member accounts the handshake completes immediately. With member
   accounts it stays `REQUESTED` until one of them calls `AcceptHandshake` — AWS requires *every*
   member to approve, which Floci simplifies to the first acceptance.
 - `CreateAccount` returns a `CreateAccountStatus` you can poll with
@@ -57,7 +64,7 @@ call `LeaveOrganization`. An account in no organization gets
 | --- | --- |
 | `CreateOrganization` | Creates an organization with the calling account as the management account. |
 | `DescribeOrganization` | Returns information about the organization the calling account belongs to. |
-| `DeleteOrganization` | Deletes the organization; every member account other than the management account must be `CLOSED`. Closed accounts are deleted with the organization. |
+| `DeleteOrganization` | Deletes the organization; every member account other than the management account must be `CLOSED`. Closed accounts are deleted with the organization, as are its root, the policy types enabled on that root, its policies and their attachments. |
 | `EnableAllFeatures` | Upgrades a consolidated-billing organization to all features via a handshake. |
 | `ListRoots` | Lists the roots defined in the organization. |
 | `CreateOrganizationalUnit` | Creates an OU under the specified root or parent OU. |
@@ -88,7 +95,7 @@ call `LeaveOrganization`. An account in no organization gets
 | `DetachPolicy` | Detaches a policy from a root, organizational unit or account. |
 | `ListPoliciesForTarget` | Lists the policies of a given type attached directly to a target. |
 | `ListTargetsForPolicy` | Lists the roots, OUs and accounts a policy is attached to. |
-| `EnablePolicyType` | Enables a policy type on the specified root. |
+| `EnablePolicyType` | Enables a policy type on the specified root, which starts with none enabled. |
 | `DisablePolicyType` | Disables a policy type on the specified root. |
 | `DescribeEffectivePolicy` | Returns the merged policy of the given type that applies to a target. |
 | `TagResource` | Adds or overwrites tags on a root, OU, account or policy. |

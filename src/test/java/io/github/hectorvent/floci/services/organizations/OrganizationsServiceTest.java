@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.organizations.model.Organization;
 import io.github.hectorvent.floci.services.organizations.model.OrganizationAccount;
 import io.github.hectorvent.floci.services.organizations.model.OrganizationPolicy;
 import io.github.hectorvent.floci.services.organizations.model.OrganizationalUnit;
+import io.github.hectorvent.floci.services.organizations.model.PolicyTypeSummary;
+import io.github.hectorvent.floci.services.organizations.model.Root;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -51,9 +53,19 @@ class OrganizationsServiceTest {
                 handshakes);
     }
 
+    /**
+     * A new root has no policy type enabled, so a test that needs service control policies enables
+     * the type first, exactly as a caller does.
+     */
+    private Organization organizationWithScpEnabled() {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "SERVICE_CONTROL_POLICY");
+        return organization;
+    }
+
     @Test
     void generatedIdsMatchTheAwsFormats() {
-        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        Organization organization = organizationWithScpEnabled();
 
         assertTrue(organization.getId().matches("o-[a-z0-9]{10}"), organization.getId());
         assertTrue(organization.getRoot().getId().matches("r-[a-z0-9]{4}"), organization.getRoot().getId());
@@ -159,6 +171,53 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void deleteOrganizationRemovesTheRootSoTheNextRootStartsWithNoPolicyTypeEnabled() {
+        Organization first = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String firstRootId = first.getRoot().getId();
+        assertEquals(List.of(), policyTypesOfTheOnlyRoot());
+
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, firstRootId, "SERVICE_CONTROL_POLICY");
+        assertEquals(List.of("SERVICE_CONTROL_POLICY"), policyTypesOfTheOnlyRoot());
+        OrganizationPolicy guardrail = service.createPolicy(MANAGEMENT_ACCOUNT, "{}", null, "Guardrail",
+                "SERVICE_CONTROL_POLICY", null);
+        service.attachPolicy(MANAGEMENT_ACCOUNT, guardrail.getId(), firstRootId);
+        String memberId =
+                service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false).getAccountId();
+        service.closeAccount(MANAGEMENT_ACCOUNT, memberId);
+
+        service.deleteOrganization(MANAGEMENT_ACCOUNT);
+
+        Organization second = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        assertEquals(List.of(second.getRoot().getId()),
+                service.listRoots(MANAGEMENT_ACCOUNT).stream().map(Root::getId).toList());
+        assertEquals(List.of(), policyTypesOfTheOnlyRoot());
+        assertEquals(List.of(OrganizationsService.FULL_AWS_ACCESS_POLICY_ID),
+                service.listPolicies(MANAGEMENT_ACCOUNT, "SERVICE_CONTROL_POLICY").stream()
+                        .map(OrganizationPolicy::getId).toList());
+
+        Root enabled =
+                service.enablePolicyType(MANAGEMENT_ACCOUNT, second.getRoot().getId(), "SERVICE_CONTROL_POLICY");
+        assertEquals(List.of("SERVICE_CONTROL_POLICY"), enabledTypesOf(enabled));
+        assertEquals(List.of("SERVICE_CONTROL_POLICY"), policyTypesOfTheOnlyRoot());
+
+        service.disablePolicyType(MANAGEMENT_ACCOUNT, second.getRoot().getId(), "SERVICE_CONTROL_POLICY");
+        assertEquals(List.of(), policyTypesOfTheOnlyRoot());
+    }
+
+    private List<String> policyTypesOfTheOnlyRoot() {
+        List<Root> roots = service.listRoots(MANAGEMENT_ACCOUNT);
+        assertEquals(1, roots.size());
+        return enabledTypesOf(roots.get(0));
+    }
+
+    private static List<String> enabledTypesOf(Root root) {
+        return root.getPolicyTypes().stream()
+                .filter(summary -> "ENABLED".equals(summary.getStatus()))
+                .map(PolicyTypeSummary::getType)
+                .toList();
+    }
+
+    @Test
     void effectivePolicyRejectsAccessControlPolicyTypes() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
 
@@ -213,7 +272,7 @@ class OrganizationsServiceTest {
 
     @Test
     void tagsRoundTripAcrossEveryTaggableResourceType() {
-        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        Organization organization = organizationWithScpEnabled();
         String rootId = organization.getRoot().getId();
         OrganizationalUnit unit = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Unit", null);
         OrganizationPolicy policy = service.createPolicy(MANAGEMENT_ACCOUNT, "{}", null, "Policy",
@@ -287,7 +346,7 @@ class OrganizationsServiceTest {
 
     @Test
     void effectiveScpLevelsWalkRootOuAccountChain() {
-        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        Organization organization = organizationWithScpEnabled();
         String rootId = organization.getRoot().getId();
         String ouId = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "workloads", null).getId();
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
@@ -309,7 +368,7 @@ class OrganizationsServiceTest {
 
     @Test
     void theManagementAccountIsExemptFromScps() {
-        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        organizationWithScpEnabled();
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
                 .getAccountId();
 
@@ -327,7 +386,7 @@ class OrganizationsServiceTest {
 
     @Test
     void disablingTheScpPolicyTypeOnTheRootRemovesTheCeiling() {
-        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        Organization organization = organizationWithScpEnabled();
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
                 .getAccountId();
         assertNotNull(service.effectiveScpLevels(member));

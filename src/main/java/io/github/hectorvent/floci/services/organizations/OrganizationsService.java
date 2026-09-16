@@ -286,9 +286,9 @@ public class OrganizationsService implements ScpProvider {
         root.setId(rootId);
         root.setArn(arn(callerAccountId, "root/" + organizationId + "/" + rootId));
         root.setName("Root");
-        if (FEATURE_SET_ALL.equals(resolvedFeatureSet)) {
-            root.getPolicyTypes().add(new PolicyTypeSummary(SERVICE_CONTROL_POLICY, "ENABLED"));
-        }
+        // A new root has no policy type enabled, whatever the feature set. ALL only makes a policy
+        // type available; EnablePolicyType is what enables one, and it is the sole writer of this
+        // list, so what ListRoots reports is exactly what Enable/DisablePolicyType has set.
         organization.setRoot(root);
 
         organizations.putForAccount(callerAccountId, organizationId, organization);
@@ -333,6 +333,10 @@ public class OrganizationsService implements ScpProvider {
                             + "Delete them before deleting the organization.", 400);
         }
 
+        // Everything the organization owns goes with it: its policies and their attachments, its
+        // member accounts, its handshakes and its create-account statuses, and — on the
+        // organization row itself — its root and the policy types enabled on that root. Nothing
+        // survives for the next CreateOrganization to inherit.
         String master = organization.getMasterAccountId();
         policiesIn(organization).forEach(policy -> policies.deleteForAccount(master, policy.getId()));
         members.forEach(account -> accounts.deleteForAccount(master, account.getId()));
@@ -1744,10 +1748,9 @@ public class OrganizationsService implements ScpProvider {
     }
 
     private void applyEnableAllFeatures(Organization organization) {
+        // Promotion makes the access-control policy types available, and nothing more: the root
+        // keeps whatever EnablePolicyType has enabled on it, which is nothing until it is called.
         organization.setFeatureSet(FEATURE_SET_ALL);
-        if (findPolicyType(organization.getRoot(), SERVICE_CONTROL_POLICY).isEmpty()) {
-            organization.getRoot().getPolicyTypes().add(new PolicyTypeSummary(SERVICE_CONTROL_POLICY, "ENABLED"));
-        }
         organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
     }
 
