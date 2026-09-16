@@ -417,4 +417,32 @@ class OrganizationsServiceTest {
         assertEquals("CLOSED", listed.getState());
         assertEquals("SUSPENDED", listed.getStatus());
     }
+
+    @Test
+    void deletingAnOrganizationCountsOnlyOpenMembersAndTakesClosedAccountsWithIt() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String accountId =
+                service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false).getAccountId();
+        service.closeAccount(MANAGEMENT_ACCOUNT, accountId);
+
+        service.deleteOrganization(MANAGEMENT_ACCOUNT);
+
+        AwsException describeError = assertThrows(AwsException.class,
+                () -> service.describeOrganization(MANAGEMENT_ACCOUNT));
+        assertEquals("AWSOrganizationsNotInUseException", describeError.getErrorCode());
+
+        AwsException listError = assertThrows(AwsException.class,
+                () -> service.listAccounts(MANAGEMENT_ACCOUNT));
+        assertEquals("AWSOrganizationsNotInUseException", listError.getErrorCode());
+    }
+
+    @Test
+    void deletingAnOrganizationStillRequiresEveryLiveMemberAccountToBeRemoved() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.deleteOrganization(MANAGEMENT_ACCOUNT));
+        assertEquals("OrganizationNotEmptyException", error.getErrorCode());
+    }
 }

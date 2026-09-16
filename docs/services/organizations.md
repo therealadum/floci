@@ -57,7 +57,7 @@ call `LeaveOrganization`. An account in no organization gets
 | --- | --- |
 | `CreateOrganization` | Creates an organization with the calling account as the management account. |
 | `DescribeOrganization` | Returns information about the organization the calling account belongs to. |
-| `DeleteOrganization` | Deletes the organization; only the management account may remain in it. |
+| `DeleteOrganization` | Deletes the organization; every member account other than the management account must be `CLOSED`. Closed accounts are deleted with the organization. |
 | `EnableAllFeatures` | Upgrades a consolidated-billing organization to all features via a handshake. |
 | `ListRoots` | Lists the roots defined in the organization. |
 | `CreateOrganizationalUnit` | Creates an OU under the specified root or parent OU. |

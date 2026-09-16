@@ -319,7 +319,10 @@ public class OrganizationsService implements ScpProvider {
     public void deleteOrganization(String callerAccountId) {
         Organization organization = requireManagementAccount(callerAccountId);
         List<OrganizationAccount> members = accountsIn(organization);
-        if (members.size() > 1) {
+        boolean hasOpenMembers = members.stream()
+                .anyMatch(account -> !account.getId().equals(organization.getMasterAccountId())
+                        && !STATE_CLOSED.equals(account.getState()));
+        if (hasOpenMembers) {
             throw new AwsException("OrganizationNotEmptyException",
                     "The organization still contains accounts other than the management account. "
                             + "Remove them before deleting the organization.", 400);
