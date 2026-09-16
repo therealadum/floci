@@ -394,4 +394,21 @@ class OrganizationsServiceTest {
                 true,
                 "not-an-email"));
     }
+
+    @Test
+    void closingAnAccountSuspendsItAtOnceAndEveryReadReportsIt() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String accountId =
+                service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false).getAccountId();
+
+        OrganizationAccount closed = service.closeAccount(MANAGEMENT_ACCOUNT, accountId);
+
+        assertEquals("SUSPENDED", closed.getStatus());
+        assertEquals("SUSPENDED", service.describeAccount(MANAGEMENT_ACCOUNT, accountId).getStatus());
+        assertEquals("SUSPENDED", service.listAccounts(MANAGEMENT_ACCOUNT).stream()
+                .filter(account -> accountId.equals(account.getId()))
+                .findFirst()
+                .orElseThrow()
+                .getStatus());
+    }
 }

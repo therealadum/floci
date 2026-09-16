@@ -84,7 +84,10 @@ EXPOSE 6397
 EXPOSE 6398
 EXPOSE 6399
 
-HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+# The start period is the image's own statement of how long the JVM takes to serve the
+# first request: a probe before it is over counts against nothing, so a client that waits
+# on the health state never reads a failure that is only a cold start.
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=90s \
     CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

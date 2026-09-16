@@ -187,9 +187,9 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", account.getArn());
         r.getAttributes().put("Status", account.getStatus());
         // State supersedes Status in the Organizations API, which retires Status on 2026-09-09.
-        // Floci only ever puts an account in ACTIVE or PENDING_CLOSURE, and both are AccountState
-        // values too, so the two agree; the phases State adds — PENDING_ACTIVATION and CLOSED —
-        // are ones the emulator does not model.
+        // Floci only ever puts an account in ACTIVE or SUSPENDED, the terminal state a close
+        // reaches at once, and both are AccountState values too, so the two agree; the phases
+        // State adds — PENDING_ACTIVATION and CLOSED — are ones the emulator does not model.
         r.getAttributes().put("State", account.getStatus());
         r.getAttributes().put("JoinedMethod", account.getJoinedMethod());
         if (account.getJoinedTimestamp() != null) {

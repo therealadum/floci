@@ -114,7 +114,14 @@ public class OrganizationsService implements ScpProvider {
     private static final String FEATURE_SET_CONSOLIDATED_BILLING = "CONSOLIDATED_BILLING";
 
     private static final String STATUS_ACTIVE = "ACTIVE";
-    private static final String STATUS_PENDING_CLOSURE = "PENDING_CLOSURE";
+    /**
+     * The terminal state a closed account reaches. AWS passes through {@code PENDING_CLOSURE}
+     * first and settles on {@code SUSPENDED} some minutes later; the emulator reaches the
+     * terminal state in the call that starts it, so a client reading the account back — a
+     * provider waiting for {@code SUSPENDED}, say — sees it on its first read instead of
+     * polling {@code DescribeAccount} for a transition nothing here would ever make.
+     */
+    private static final String STATUS_SUSPENDED = "SUSPENDED";
 
     private static final String HANDSHAKE_REQUESTED = "REQUESTED";
     private static final String HANDSHAKE_ACCEPTED = "ACCEPTED";
@@ -616,7 +623,7 @@ public class OrganizationsService implements ScpProvider {
             throw new AwsException("ConstraintViolationException",
                     "The management account can't be closed.", 400);
         }
-        account.setStatus(STATUS_PENDING_CLOSURE);
+        account.setStatus(STATUS_SUSPENDED);
         accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
         return account;
     }
