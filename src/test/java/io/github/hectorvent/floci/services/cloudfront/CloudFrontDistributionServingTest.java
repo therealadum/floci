@@ -14,6 +14,13 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.test.junit.QuarkusTest;
+import io.vertx.core.Vertx;
+import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpClientOptions;
+import io.vertx.core.http.HttpMethod;
+import io.vertx.core.http.HttpVersion;
+import io.vertx.core.http.RequestOptions;
+import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +33,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
@@ -57,6 +65,9 @@ class CloudFrontDistributionServingTest {
 
     @Inject
     CloudFrontService cloudFrontService;
+
+    @Inject
+    Vertx vertx;
 
     @Test
     void servesRootObjectSubdirSpaFallbackAndPathRouting() {
@@ -139,6 +150,52 @@ class CloudFrontDistributionServingTest {
         // The implementation-only controller path is not an alternate public endpoint.
         given().when().get("/_cloudfront/" + dist.getId() + "/")
                 .then().statusCode(404);
+    }
+
+    @Test
+    void routesHttp2RequestByAuthorityWithoutHostHeader() throws Exception {
+        // HTTP/2 carries the host in :authority and sends no Host header. The distribution
+        // filter must route by that authority rather than pass the request through to S3.
+        String suffix = suffix();
+        String bucket = "cf-h2-" + suffix;
+        String alias = "viewer-h2-" + suffix + ".example.test";
+        createBucket(bucket);
+        putObject(bucket, "index.html", "H2-INDEX-" + suffix, "text/html");
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setDefaultRootObject("index.html");
+        cfg.setAliases(List.of(alias));
+        cfg.setOrigins(List.of(s3Origin("h2-origin", bucket)));
+        cfg.setDefaultCacheBehavior(defaultBehavior("h2-origin"));
+        cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        int port = io.restassured.RestAssured.port;
+        HttpClient client = vertx.createHttpClient(new HttpClientOptions()
+                .setProtocolVersion(HttpVersion.HTTP_2)
+                .setHttp2ClearTextUpgrade(false));
+        try {
+            RequestOptions options = new RequestOptions()
+                    .setMethod(HttpMethod.GET)
+                    .setServer(SocketAddress.inetSocketAddress(port, "localhost"))
+                    .setHost(alias)
+                    .setPort(port)
+                    .setURI("/");
+            H2Response response = client.request(options)
+                    .compose(req -> req.send()
+                            .compose(resp -> resp.body()
+                                    .map(body -> new H2Response(resp.version(), resp.statusCode(),
+                                            body.toString(StandardCharsets.UTF_8)))))
+                    .toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+            assertEquals(HttpVersion.HTTP_2, response.version());
+            assertEquals(200, response.status());
+            assertTrue(response.body().contains("H2-INDEX-" + suffix), response.body());
+        } finally {
+            client.close().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+        }
+    }
+
+    private record H2Response(HttpVersion version, int status, String body) {
     }
 
     @Test

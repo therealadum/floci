@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -102,7 +103,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // ":authority" pseudo-header, surfaced here as the request URI authority.
         // Falling back to it keeps virtual-hosted-style routing working when a
         // browser negotiates HTTP/2 over HTTPS (where the Host header is absent).
-        String host = resolveHost(requestContext.getHeaderString("Host"), uri);
+        String host = RequestHost.of(requestContext, uri);
         if (host == null) return;
 
         // Do not hijack requests meant for other AWS services
@@ -170,10 +171,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      * @return the effective authority ({@code host[:port]}), or {@code null} if neither is available
      */
     static String resolveHost(String hostHeader, URI requestUri) {
-        if (hostHeader != null) {
-            return hostHeader;
-        }
-        return requestUri != null ? requestUri.getAuthority() : null;
+        return RequestHost.of(hostHeader, requestUri);
     }
 
     /**

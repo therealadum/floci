@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
@@ -171,7 +172,7 @@ public class CloudFrontServingController {
         boolean preflight = "OPTIONS".equals(method);
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
-                headers.getHeaderString("Host"),
+                RequestHost.of(headers, uriInfo.getRequestUri()),
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION),
                 request.getHeader("Origin"), method,
                 preflight ? request.getHeader("Access-Control-Request-Method") : null,
@@ -314,7 +315,7 @@ public class CloudFrontServingController {
             io.vertx.core.http.HttpServerRequest request,
             String rawViewerPath) {
         String scheme = request.scheme() != null ? request.scheme() : "https";
-        String host = request.getHeader("Host");
+        String host = RequestHost.of(request);
         if (host == null || host.isBlank()) {
             host = distribution.getDomainName();
         }

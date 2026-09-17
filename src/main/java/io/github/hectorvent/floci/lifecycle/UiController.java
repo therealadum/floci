@@ -1,16 +1,19 @@
 package io.github.hectorvent.floci.lifecycle;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager.UiStatus;
 import io.github.hectorvent.floci.services.floci.ui.UiPages;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
-import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 /**
  * Browser-facing endpoints that launch and redirect to the floci-ui sidecar.
@@ -47,7 +50,8 @@ public class UiController {
     @GET
     @Path("/status")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response status(@HeaderParam("Host") String host) {
+    public Response status(@Context HttpHeaders headers, @Context UriInfo uriInfo) {
+        String host = RequestHost.of(headers, uriInfo.getRequestUri());
         UiStatus s = uiManager.status();
         if (s.error() != null) {
             return Response.ok(new StatusResponse(false, null, s.error())).build();

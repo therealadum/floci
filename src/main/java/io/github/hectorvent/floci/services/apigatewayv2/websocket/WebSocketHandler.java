@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigatewayv2.websocket;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -135,12 +136,7 @@ public class WebSocketHandler {
      * URI authority ({@code :authority}) for HTTP/2.
      */
     private static String resolveRequestHost(RoutingContext ctx) {
-        String host = ctx.request().getHeader("Host");
-        if (host != null) {
-            return host;
-        }
-        io.vertx.core.net.HostAndPort authority = ctx.request().authority();
-        return authority != null ? authority.host() : null;
+        return RequestHost.of(ctx.request());
     }
 
     /**

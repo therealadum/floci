@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -485,20 +486,26 @@ public class ExecuteApiSigV4Authorizer {
     }
 
     /**
-     * The {@code host} value the client signed. Taken from the {@code Host} header the request
-     * carried rather than from the resolved URI, because that is what the signer hashed; the URI
-     * is only a fallback for callers (notably unit tests) that build a request without one.
+     * The {@code host} value the client signed: the request host as the client sent it, the
+     * {@code Host} header under HTTP/1.1 or the {@code :authority} under HTTP/2, read through
+     * {@link RequestHost}. SigV4 signers omit the default ports 80 and 443 from the signed host,
+     * so a trailing {@code :80} or {@code :443} is dropped; any other port is kept.
      */
     private static String hostHeader(HttpHeaders headers, UriInfo uriInfo) {
-        String host = headers == null ? null : headers.getHeaderString("Host");
-        if (host != null && !host.isBlank()) {
+        return withoutDefaultPort(String.valueOf(RequestHost.of(headers, uriInfo.getRequestUri())));
+    }
+
+    static String withoutDefaultPort(String host) {
+        int colon = host.lastIndexOf(':');
+        // A colon inside IPv6 brackets is part of the address, not a port separator.
+        if (colon < 0 || colon < host.lastIndexOf(']')) {
             return host;
         }
-        URI requestUri = uriInfo.getRequestUri();
-        int port = requestUri.getPort();
-        return port > 0 && port != 80 && port != 443
-                ? requestUri.getHost() + ":" + port
-                : String.valueOf(requestUri.getHost());
+        if (host.indexOf(':') != colon && !host.startsWith("[")) {
+            return host; // bare IPv6 literal without brackets carries no port
+        }
+        String port = host.substring(colon + 1);
+        return "80".equals(port) || "443".equals(port) ? host.substring(0, colon) : host;
     }
 
     private static String normalizeHeaderValue(String value) {

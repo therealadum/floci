@@ -331,6 +331,38 @@ class ExecuteApiSigV4AuthorizerTest {
         assertTrue(result.authorized(), String.valueOf(result.detail()));
     }
 
+    @Test
+    void http2RequestWithoutHostHeaderSignsHostWithoutDefaultPort() throws Exception {
+        // HTTP/2 sends no Host header; the authority arrives on the request URI. SigV4 signers
+        // omit the default ports 80 and 443 from the signed host, and keep any other port.
+        String clientPath = "/test/iam";
+        String host = "abc.execute-api.localhost.floci.io";
+        Map<String, String> signed = ExecuteApiRequestSigner.signedHeaders(
+                "GET", clientPath, Map.of(), host, null, "test", "test", REGION, Instant.now());
+
+        ExecuteApiSigV4Authorizer.Result result = authorizer.authorize(
+                "GET", headers(signed, null),
+                uriInfo(URI.create("https://" + host + ":443" + PATH)), null, clientPath);
+
+        assertTrue(result.authorized(), String.valueOf(result.detail()));
+
+        Map<String, String> signedWithPort = ExecuteApiRequestSigner.signedHeaders(
+                "GET", clientPath, Map.of(), host + ":4566", null, "test", "test", REGION, Instant.now());
+
+        ExecuteApiSigV4Authorizer.Result withPort = authorizer.authorize(
+                "GET", headers(signedWithPort, null),
+                uriInfo(URI.create("https://" + host + ":4566" + PATH)), null, clientPath);
+
+        assertTrue(withPort.authorized(), String.valueOf(withPort.detail()));
+    }
+
+    private static UriInfo uriInfo(URI requestUri) {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(requestUri);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        return uriInfo;
+    }
+
     private static String sha256Hex(byte[] input) throws Exception {
         byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(input);
         StringBuilder hex = new StringBuilder(digest.length * 2);

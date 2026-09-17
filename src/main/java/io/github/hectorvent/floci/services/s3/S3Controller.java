@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
 import io.github.hectorvent.floci.core.common.AccountResolver;
@@ -2885,7 +2886,7 @@ public class S3Controller {
         // HTTP/2 (RFC 9113) carries no Host header, so fall back to the request URI authority —
         // the same resolution S3VirtualHostFilter applies. Without this, a website bucket reached
         // over HTTP/2 would be served as an API (XML) response instead of website HTML.
-        String host = S3VirtualHostFilter.resolveHost(httpHeaders.getHeaderString("Host"), uriInfo.getRequestUri());
+        String host = RequestHost.of(httpHeaders, uriInfo.getRequestUri());
         return host != null && host.contains("s3-website");
     }
 

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.inject.Inject;
@@ -167,7 +168,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             URI requestUri = requestContext.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
                     ? uri
                     : requestContext.getUriInfo().getRequestUri();
-            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"), requestUri);
+            String authority = RequestHost.of(requestContext, requestUri);
 
             StringBuilder canonicalHeaders = new StringBuilder();
             for (String header : signedHeaders.split(";")) {

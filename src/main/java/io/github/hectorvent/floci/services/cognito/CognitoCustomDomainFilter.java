@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.AccountContextFilter;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import jakarta.annotation.Priority;
@@ -51,10 +52,7 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
             return;
         }
         // HTTP/2 has no Host header; its :authority arrives as the request URI authority.
-        String host = requestContext.getHeaderString("Host");
-        if (host == null) {
-            host = originalUri.getAuthority();
-        }
+        String host = RequestHost.of(requestContext, originalUri);
         if (host == null) {
             return;
         }
