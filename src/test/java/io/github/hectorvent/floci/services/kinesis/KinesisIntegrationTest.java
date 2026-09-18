@@ -71,7 +71,10 @@ class KinesisIntegrationTest {
             .body("Shards[0].HashKeyRange.EndingHashKey", equalTo(FIRST_SHARD_ENDING_HASH_KEY))
             .body("Shards[1].HashKeyRange.StartingHashKey", equalTo(SECOND_SHARD_STARTING_HASH_KEY))
             .body("Shards[1].HashKeyRange.EndingHashKey", equalTo(MAX_HASH_KEY))
-            .body("Shards[0].SequenceNumberRange.StartingSequenceNumber", notNullValue());
+            .body("Shards[0].SequenceNumberRange.StartingSequenceNumber", notNullValue())
+            // AWS omits NextToken on a last page. An explicit null makes an SDK paginator
+            // see a token that is present but unusable.
+            .body("$", not(hasKey("NextToken")));
     }
 
     @Test

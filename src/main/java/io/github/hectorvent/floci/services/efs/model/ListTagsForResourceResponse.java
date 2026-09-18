@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.efs.model;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -7,6 +8,7 @@ import java.util.List;
 
 @JsonNaming(PropertyNamingStrategies.UpperCamelCaseStrategy.class)
 @RegisterForReflection
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class ListTagsForResourceResponse {
     private List<Tag> tags;
     private String nextToken;

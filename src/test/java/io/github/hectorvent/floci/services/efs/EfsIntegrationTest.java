@@ -256,8 +256,57 @@ class EfsIntegrationTest {
             .statusCode(404);
     }
 
+    /**
+     * AWS omits the pagination fields entirely when there is no further page. An explicit
+     * JSON null instead makes an SDK paginator see a marker that is present but unusable.
+     */
     @Test
     @Order(13)
+    void lastPageOmitsPaginationMarkers() {
+        given()
+            .queryParam("FileSystemId", fileSystemId)
+        .when()
+            .get("/2015-02-01/file-systems")
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("Marker")))
+            .body("$", not(hasKey("NextMarker")));
+
+        given()
+            .queryParam("FileSystemId", fileSystemId)
+        .when()
+            .get("/2015-02-01/mount-targets")
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("Marker")))
+            .body("$", not(hasKey("NextMarker")));
+
+        given()
+            .queryParam("FileSystemId", fileSystemId)
+        .when()
+            .get("/2015-02-01/access-points")
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("NextToken")));
+
+        given()
+        .when()
+            .get("/2015-02-01/tags/" + fileSystemId)
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("Marker")))
+            .body("$", not(hasKey("NextMarker")));
+
+        given()
+        .when()
+            .get("/2015-02-01/resource-tags/" + fileSystemId)
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    @Order(14)
     void deleteResources() {
         given()
             .contentType("application/json")

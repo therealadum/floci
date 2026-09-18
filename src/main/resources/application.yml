@@ -651,6 +651,7 @@ floci:
       enabled: true
     organizations:
       enabled: true
+      scp-enforcement-enabled: false  # When true, service control policies are evaluated and can deny a request.
       # management-account-email: ""  # When set, overrides the management-account email reported by DescribeOrganization and account listings.
     rum:
       enabled: true

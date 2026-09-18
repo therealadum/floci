@@ -51,6 +51,28 @@ class ServiceConfigYamlCoverageTest {
     }
 
     /**
+     * The organization policy enforcement flag gates whether service control policies are
+     * evaluated at all, so it has to be visible and toggleable from the file like any other
+     * effective runtime setting, not reachable only through its {@code @WithDefault}.
+     */
+    @Test
+    void organizationsDeclaresScpEnforcementInBothConfigs() throws IOException {
+        List<String> missing = new ArrayList<>();
+
+        for (Path config : CONFIGS) {
+            JsonNode flag = new YAMLMapper().readTree(config.toFile())
+                    .path("floci").path("services").path("organizations").path("scp-enforcement-enabled");
+            if (!flag.isBoolean()) {
+                missing.add(config + " -> floci.services.organizations.scp-enforcement-enabled");
+            }
+        }
+
+        assertTrue(missing.isEmpty(),
+                "floci.services.organizations.scp-enforcement-enabled must be declared explicitly in "
+                        + "both application.yml files. Missing: " + missing);
+    }
+
+    /**
      * Config records without an {@code enabled()} toggle (for example {@code DuckConfig},
      * which only carries an image and an optional URL) are not services that can be turned
      * off, so they are exempt.

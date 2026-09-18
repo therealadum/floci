@@ -383,6 +383,7 @@ floci:
       enabled: true
     organizations:
       enabled: true
+      scp-enforcement-enabled: false
     rum:
       enabled: true
     networkfirewall:

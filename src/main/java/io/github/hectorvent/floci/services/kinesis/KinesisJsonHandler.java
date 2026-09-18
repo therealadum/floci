@@ -729,8 +729,6 @@ public class KinesisJsonHandler {
             }
         }
 
-        response.putNull("NextToken");
-
         return Response.ok(response).build();
     }
 
