@@ -483,13 +483,46 @@ blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore f
 the account root the same way it does on real AWS, consistent with the account root already
 being bounded by SCPs (below): both forms of root enforcement now agree.
 
-**Caveat:** `resolveCallerArn` hardcodes the assumed-role session name as `floci-session`,
+**Caveat:** `resolveCallerPrincipal` hardcodes the assumed-role session name as `floci-session`,
 so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a
 different session name. This matches what `sts:GetCallerIdentity` already reports.
 
-**Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource
-policy), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the
-PartiQL operations.
+**Not yet supported**: `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` /
+`TransactGetItems` and the PartiQL operations.
+
+### Resource-based policies
+
+With enforcement on, the resource's own policy is evaluated beside the caller's identity
+policies. Three services supply one today: an S3 bucket policy, a KMS key policy, and a
+secret's resource policy. Each one is read through a `ResourcePolicySource` beside its service,
+collected by `ResourcePolicyLookup`; a service joins by adding one, and the enforcement filter
+does not change.
+
+`Principal` and `NotPrincipal` are both read. A principal is matched by `*`, `{"AWS": "*"}`, an
+account ID, `arn:aws:iam::<account>:root`, an IAM user ARN, an assumed-role session ARN, the ARN
+of the role behind that session, `Service`, or `Federated`. Following AWS, a `NotPrincipal` that
+means to exclude a role must name both the role ARN and the assumed-role session ARN.
+
+The decision follows AWS:
+
+- **Inside the resource's own account** either policy suffices — except that a statement naming
+  only an account delegates to that account's IAM rather than granting, so the caller still needs
+  an identity policy.
+- **Across accounts** both must allow: the resource's policy in the account that owns it, and the
+  caller's identity policy in the account that owns the caller. A resource with no policy at all
+  refuses every caller outside its own account.
+- **An explicit `Deny`** in any policy refuses, including one in a resource policy against the
+  owning account's own administrator.
+- **A KMS key policy is the root of authority** over its key. An identity policy grants on a key
+  only where the key policy delegates to the account, which is what the
+  `arn:aws:iam::<account>:root` statement of the default key policy does. A key policy that omits
+  that statement refuses even an administrator of the key's own account.
+
+A resource policy's `Condition` reaches the same condition evaluation as an identity policy's.
+
+A caller carrying no IAM credential at all — an anonymous S3 request, and the CloudFront service
+and origin-access-identity principals — is not a principal this evaluator can match, and its
+bucket-policy handling stays in `S3PublicAccessEvaluator`.
 
 ### Assumed roles
 

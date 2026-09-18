@@ -7,8 +7,11 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyLookup;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.RequestPrincipal;
+import io.github.hectorvent.floci.services.iam.model.ResourcePolicies;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -50,9 +53,11 @@ import java.util.regex.Pattern;
  * The account-root principal — a bare 12-digit account-id access key — keeps full access, bounded
  * by service control policies, as it has on AWS.
  *
- * <p>Evaluates the caller's identity policies, optional session policy, and optional
- * permissions boundary. Resource-based policies (S3 bucket policy, Lambda resource
- * policy, etc.) are not yet supplied to this filter.
+ * <p>Evaluates the caller's identity policies, optional session policy, optional permissions
+ * boundary, and the resource's own policies. The resource policies come from
+ * {@link ResourcePolicyLookup}, one lookup from a resource ARN to whatever policies are attached
+ * to it, resolved lazily so IAM depends on no service that holds one. A service joins that lookup
+ * by adding a {@code ResourcePolicySource} beside itself; nothing here changes.
  *
  * <p>Reads the signing credential from either the {@code Authorization} header or, for a
  * presigned URL, the {@code X-Amz-Credential} query parameter - both request shapes get the
@@ -90,6 +95,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final ResolvedServiceCatalog catalog;
     private final Instance<ScpProvider> scpProvider;
     private final SessionAccountLookup sessionAccountLookup;
+    private final ResourcePolicyLookup resourcePolicyLookup;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -104,7 +110,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 CurrentVertxRequest currentVertxRequest,
                                 ResolvedServiceCatalog catalog,
                                 Instance<ScpProvider> scpProvider,
-                                SessionAccountLookup sessionAccountLookup) {
+                                SessionAccountLookup sessionAccountLookup,
+                                ResourcePolicyLookup resourcePolicyLookup) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -118,6 +125,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.catalog = catalog;
         this.scpProvider = scpProvider;
         this.sessionAccountLookup = sessionAccountLookup;
+        this.resourcePolicyLookup = resourcePolicyLookup;
     }
 
     @Override
@@ -215,9 +223,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // root user, so a DenyRootUser guardrail keyed on it must fire against floci's account-root
         // stand-in the same way it enforces SCPs against it (the account-root SCP change above);
         // leaving it absent here would have made the two forms of root enforcement inconsistent.
-        Optional<String> principalArn = accountRootPrincipal
-                ? Optional.of("arn:aws:iam::" + accountId + ":root")
-                : iamService.resolveCallerArn(akid);
+        RequestPrincipal principal = accountRootPrincipal
+                ? RequestPrincipal.accountRoot(accountId)
+                : iamService.resolveCallerPrincipal(akid).orElse(null);
+        caller = caller.withPrincipal(principal);
+        Optional<String> principalArn = principal == null
+                ? Optional.empty()
+                : Optional.ofNullable(principal.arn());
         if (principalArn.isPresent()) {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
@@ -231,8 +243,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         for (String resource : resources) {
+            ResourcePolicies resourcePolicies = resourcePolicyLookup.policiesFor(resource);
             for (Map<String, List<String>> targetContext : targetContexts) {
-                Decision decision = evaluator.evaluate(caller, null, action, resource, targetContext);
+                Decision decision = evaluator.evaluate(caller, resourcePolicies, action, resource, targetContext);
                 if (decision != Decision.DENY) {
                     continue;
                 }
@@ -314,15 +327,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
 
             Map<String, List<String>> conditionContext = null;
-            Optional<String> principalArn = accountRootPrincipal
-                    ? Optional.of("arn:aws:iam::" + accountId + ":root")
-                    : iamService.resolveCallerArn(akid);
-            if (principalArn.isPresent()) {
+            RequestPrincipal principal = accountRootPrincipal
+                    ? RequestPrincipal.accountRoot(accountId)
+                    : iamService.resolveCallerPrincipal(akid).orElse(null);
+            caller = caller.withPrincipal(principal);
+            if (principal != null && principal.arn() != null) {
                 conditionContext = new HashMap<>();
-                conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
+                conditionContext.put("aws:PrincipalArn", List.of(principal.arn()));
             }
 
-            Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
+            ResourcePolicies resourcePolicies = resourcePolicyLookup.policiesFor(resource);
+            Decision decision = evaluator.evaluate(caller, resourcePolicies, action, resource, conditionContext);
             if (decision != Decision.DENY) {
                 return;
             }

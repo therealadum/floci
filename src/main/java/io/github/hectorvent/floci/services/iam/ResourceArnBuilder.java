@@ -57,7 +57,7 @@ public class ResourceArnBuilder {
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
-            case "kms"            -> List.of(buildKmsArn(path, region, accountId));
+            case "kms"            -> List.of(buildKmsArn(ctx, path, region, accountId));
             default               -> List.of("*");
         };
     }
@@ -334,10 +334,34 @@ public class ResourceArnBuilder {
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────
-    private String buildKmsArn(String path, String region, String accountId) {
+    private String buildKmsArn(ContainerRequestContext ctx, String path, String region, String accountId) {
         String keyId = extractSegmentAfter(path, "keys");
-        if (keyId == null) return AwsArnUtils.Arn.of("kms", region, accountId, "key/*").toString();
+        if (keyId == null) {
+            // KMS is JSON 1.1: every request is a POST to "/" and the key is named by KeyId in the
+            // body, never in the path. Without reading it the target of every KMS call was
+            // "key/*", which names no key and so can carry no key policy.
+            keyId = readKmsKeyId(ctx);
+        }
+        if (keyId == null) {
+            return AwsArnUtils.Arn.of("kms", region, accountId, "key/*").toString();
+        }
+        if (AwsArnUtils.isArnFor(keyId, "kms")) {
+            // A full ARN names the key's own account, which is how a cross-account key is reached.
+            return keyId;
+        }
+        if (keyId.startsWith("alias/")) {
+            return AwsArnUtils.Arn.of("kms", region, accountId, keyId).toString();
+        }
         return AwsArnUtils.Arn.of("kms", region, accountId, "key/" + keyId).toString();
+    }
+
+    private String readKmsKeyId(ContainerRequestContext ctx) {
+        JsonNode json = readJsonBody(ctx);
+        if (json == null || !json.isObject() || !json.hasNonNull("KeyId")) {
+            return null;
+        }
+        String keyId = json.get("KeyId").asText().trim();
+        return keyId.isEmpty() ? null : keyId;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

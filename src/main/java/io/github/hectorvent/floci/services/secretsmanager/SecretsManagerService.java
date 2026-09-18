@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
@@ -350,6 +351,48 @@ public class SecretsManagerService implements ResourceProvider {
             LOG.infov("Marked secret {0} in account {1} as owned by {2}",
                     secret.getName(), arn.accountId(), owningService);
         }
+    }
+
+    /**
+     * The resource policy attached to a secret named by its full ARN, read from the account that
+     * ARN names rather than the account the request arrives in. The enforcement filter needs a
+     * secret's policy and its owner before the secret is touched, including one in another account.
+     *
+     * @return the secret's owner and resource policy, or empty when the ARN names no secret held here
+     */
+    public Optional<SecretOwnerPolicy> secretOwnerPolicy(String secretArn) {
+        if (secretArn == null || !secretArn.startsWith("arn:")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = parseOrNull(secretArn);
+        if (arn == null || !"secretsmanager".equals(arn.service()) || secretArn.contains("*")) {
+            return Optional.empty();
+        }
+        Secret secret = findByArnInAccount(secretArn, arn);
+        if (secret == null) {
+            // AWS accepts an ARN without the trailing random suffix; fall back to the name it carries.
+            String prefix = "secret:";
+            if (!arn.resource().startsWith(prefix)) {
+                return Optional.empty();
+            }
+            String name = arn.resource().substring(prefix.length());
+            secret = readForAccount(arn.accountId(), regionKey(arn.region(), name));
+            if (secret == null) {
+                return Optional.empty();
+            }
+        }
+        return Optional.of(new SecretOwnerPolicy(arn.accountId(), secret.getResourcePolicy()));
+    }
+
+    private Secret readForAccount(String accountId, String key) {
+        if (store instanceof AccountAwareStorageBackend<Secret> aware) {
+            return aware.getForAccount(accountId, key).orElse(null);
+        }
+        return store.get(key).orElse(null);
+    }
+
+    /** A secret's owning account and its resource policy, or null where it carries none. */
+    public record SecretOwnerPolicy(String ownerAccountId, String policy) {
     }
 
     /** Finds a secret by full ARN within the account and region that ARN names. */
@@ -1013,6 +1056,22 @@ public class SecretsManagerService implements ResourceProvider {
                 Secret byName = store.get(regionKey(arnRegion, nameFromArn)).orElse(null);
                 if (byName != null) {
                     return byName;
+                }
+            }
+
+            // 3. The ARN names another account. A full ARN is how AWS reaches a secret shared
+            //    across accounts, and whether the caller may is the resource policy's answer, not
+            //    this lookup's: without this the request failed as not-found before the decision
+            //    the resource policy exists to make could ever show.
+            if (parsedArn != null && parsedArn.accountId() != null) {
+                Secret crossAccount = findByArnInAccount(secretId, parsedArn);
+                if (crossAccount == null && parsedArn.resource().startsWith(secretResourcePrefix)) {
+                    crossAccount = readForAccount(parsedArn.accountId(),
+                            regionKey(parsedArn.region(),
+                                    parsedArn.resource().substring(secretResourcePrefix.length())));
+                }
+                if (crossAccount != null) {
+                    return crossAccount;
                 }
             }
 

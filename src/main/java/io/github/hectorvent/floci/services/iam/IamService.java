@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
+import io.github.hectorvent.floci.services.iam.model.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -2277,6 +2278,45 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
 
         return Optional.empty();
+    }
+
+    /**
+     * Resolves the principal a request arrives as, in the forms a resource policy can name it by:
+     * an IAM user by its user ARN, an assumed-role session by both its session ARN and the ARN of
+     * the role behind it, so a policy naming either one matches.
+     *
+     * @return the principal, or empty for a credential that names none
+     */
+    public Optional<RequestPrincipal> resolveCallerPrincipal(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+
+        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        if (akOpt.isPresent()) {
+            return users.get(akOpt.get().getUserName())
+                    .map(IamUser::getArn)
+                    .map(arn -> RequestPrincipal.user(
+                            AwsArnUtils.accountOrDefault(arn, regionResolver.getAccountId()), arn));
+        }
+
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
+        if (sessionOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        SessionCredential session = sessionOpt.get();
+        if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
+            return Optional.empty();
+        }
+        String roleArn = session.getRoleArn();
+        if (roleArn == null) {
+            return Optional.empty();
+        }
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+        String sessionArn = AwsArnUtils.Arn
+                .of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString();
+        return Optional.of(RequestPrincipal.assumedRole(accountId, sessionArn, roleArn));
     }
 
     /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */

@@ -93,7 +93,8 @@ class IamEnforcementFilterTest {
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
                 mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
-                catalog, scpProvider, sessionAccountLookup);
+                catalog, scpProvider, sessionAccountLookup,
+                mock(io.github.hectorvent.floci.services.iam.ResourcePolicyLookup.class));
     }
 
     @Test
@@ -432,7 +433,8 @@ class IamEnforcementFilterTest {
                 actionRegistry, arnBuilder, requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
                 mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
-                catalog, scpProvider, sessionAccountLookup);
+                catalog, scpProvider, sessionAccountLookup,
+                mock(io.github.hectorvent.floci.services.iam.ResourcePolicyLookup.class));
     }
 
     @Test
@@ -616,9 +618,9 @@ class IamEnforcementFilterTest {
     }
 
     // aws:PrincipalArn is populated only for principals whose ARN is known — IAM users and
-    // assumed-role sessions (IamService.resolveCallerArn). A condition-scoped SCP keyed on the
+    // assumed-role sessions (IamService.resolveCallerPrincipal). A condition-scoped SCP keyed on the
     // principal ARN must therefore fire for a real IAM identity. It stays inert for the bare
-    // account-root key, whose resolveCallerArn is empty (see the workload-guardrails test above).
+    // account-root key, whose resolveCallerPrincipal is empty (see the workload-guardrails test above).
     private static final String DENY_IAM_USER_PRINCIPAL =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"*\","
             + "\"Resource\":\"*\",\"Condition\":{\"StringLike\":"
@@ -643,8 +645,9 @@ class IamEnforcementFilterTest {
         // A real IAM user: full-access identity policy plus a known principal ARN.
         when(iamService.resolveCallerContext(akid))
                 .thenReturn(CallerContext.of(List.of(FULL_AWS_ACCESS)));
-        when(iamService.resolveCallerArn(akid))
-                .thenReturn(Optional.of("arn:aws:iam::" + account + ":user/alice"));
+        when(iamService.resolveCallerPrincipal(akid))
+                .thenReturn(Optional.of(io.github.hectorvent.floci.services.iam.model.RequestPrincipal
+                        .user(account, "arn:aws:iam::" + account + ":user/alice")));
         when(arnBuilder.build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
                 .thenReturn("*");
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
@@ -667,7 +670,7 @@ class IamEnforcementFilterTest {
     // lets a principal-scoped Allow match. An identity policy that grants access only when the caller
     // is an IAM user must therefore ALLOW a real IAM user. Before aws:PrincipalArn was populated the
     // key was absent, the StringLike failed, the sole Allow never matched, and the request was denied
-    // by default — so stubbing resolveCallerArn empty makes this test RED, proving it is load-bearing.
+    // by default — so stubbing resolveCallerPrincipal empty makes this test RED, proving it is load-bearing.
     private static final String ALLOW_IF_IAM_USER_PRINCIPAL =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\","
             + "\"Resource\":\"*\",\"Condition\":{\"StringLike\":"
@@ -691,8 +694,9 @@ class IamEnforcementFilterTest {
         // A real IAM user whose ONLY grant is conditional on being an IAM-user principal.
         when(iamService.resolveCallerContext(akid))
                 .thenReturn(CallerContext.of(List.of(ALLOW_IF_IAM_USER_PRINCIPAL)));
-        when(iamService.resolveCallerArn(akid))
-                .thenReturn(Optional.of("arn:aws:iam::" + account + ":user/bob"));
+        when(iamService.resolveCallerPrincipal(akid))
+                .thenReturn(Optional.of(io.github.hectorvent.floci.services.iam.model.RequestPrincipal
+                        .user(account, "arn:aws:iam::" + account + ":user/bob")));
         when(arnBuilder.buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
                 .thenReturn(List.of("*"));
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
@@ -319,6 +320,57 @@ public class KmsService implements ResourceProvider {
 
     public KmsKey describeKey(String keyId, String region) {
         return resolveKey(keyId, region);
+    }
+
+    /**
+     * The key policy of a key named by its ARN, read from the account the ARN names rather than
+     * the account the request arrives in. The enforcement filter needs a key's policy and its
+     * owner before any key is touched, including a key in another account.
+     *
+     * @return the key's policy, or empty when the ARN names no key this emulator holds
+     */
+    public Optional<KeyOwnerPolicy> keyOwnerPolicy(String keyArn) {
+        if (keyArn == null || !AwsArnUtils.isArnFor(keyArn, "kms")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(keyArn);
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+        String resource = arn.resource();
+        String region = arn.region();
+        String keyId;
+        if (resource.startsWith("alias/")) {
+            KmsAlias alias = readForAccount(aliasStore, arn.accountId(), region + "::" + resource);
+            if (alias == null) {
+                return Optional.empty();
+            }
+            keyId = alias.getTargetKeyId();
+        } else if (resource.startsWith("key/")) {
+            keyId = resource.substring("key/".length());
+        } else {
+            return Optional.empty();
+        }
+        if (keyId.isEmpty() || keyId.contains("*")) {
+            return Optional.empty();
+        }
+        KmsKey key = readForAccount(keyStore, arn.accountId(), region + "::" + keyId);
+        return key == null
+                ? Optional.empty()
+                : Optional.of(new KeyOwnerPolicy(arn.accountId(), key.getPolicy()));
+    }
+
+    private static <V> V readForAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (store instanceof AccountAwareStorageBackend<V> aware) {
+            return aware.getForAccount(accountId, key).orElse(null);
+        }
+        return store.get(key).orElse(null);
+    }
+
+    /** A key's owning account and its key policy. */
+    public record KeyOwnerPolicy(String ownerAccountId, String policy) {
     }
 
     public List<KmsKey> listKeys(String region) {

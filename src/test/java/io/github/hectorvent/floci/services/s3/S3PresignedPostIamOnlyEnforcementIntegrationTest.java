@@ -102,6 +102,11 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         String userName = "presigned-post-denied-xacct-user-" + suffix;
 
         createBucketAsRoot(bucket);
+        // The bucket belongs to the default account and the user to another, so a bucket policy
+        // admitting that account is what makes the request cross-account-legal at all. Without it
+        // the cross-account rule refuses before any identity policy is read, and the
+        // identity-policy evaluation this test is about would never show.
+        allowAccountInBucketPolicy(bucket, NON_DEFAULT_ACCOUNT);
         String accessKeyId = createUser(userName, NON_DEFAULT_ACCOUNT);
         putUserPolicy(userName, "DenyPutObject", """
                 {"Version":"2012-10-17","Statement":[
@@ -128,6 +133,7 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         String userName = "presigned-post-allowed-xacct-user-" + suffix;
 
         createBucketAsRoot(bucket);
+        allowAccountInBucketPolicy(bucket, NON_DEFAULT_ACCOUNT);
         String accessKeyId = createUser(userName, NON_DEFAULT_ACCOUNT);
         putUserPolicy(userName, "AllowPutObject", """
                 {"Version":"2012-10-17","Statement":[
@@ -149,6 +155,22 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         String amzDate = AMZ_DATE_FMT.format(Instant.now());
         String dateStamp = amzDate.substring(0, 8);
         return accessKeyId + "/" + dateStamp + "/" + REGION + "/s3/aws4_request";
+    }
+
+    /** Admits every principal of {@code accountId} to write objects, as AWS's cross-account rule needs. */
+    private static void allowAccountInBucketPolicy(String bucket, String accountId) {
+        given()
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "s3"))
+                .contentType("application/json")
+                .body("""
+                    {"Version":"2012-10-17","Statement":[
+                      {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%s:root"},
+                       "Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}]}"""
+                        .formatted(accountId, bucket))
+        .when()
+                .put("/" + bucket + "?policy")
+        .then()
+                .statusCode(200);
     }
 
     private static void createBucketAsRoot(String bucket) {

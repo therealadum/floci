@@ -10,6 +10,21 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Reads a bucket policy for a caller that carries no IAM credential: an anonymous request, and
+ * the CloudFront service and origin-access-identity principals S3 admits by name.
+ *
+ * <p>A bucket policy has one meaning, and {@link io.github.hectorvent.floci.services.iam.IamPolicyEvaluator}
+ * holds it. A signed request goes there: {@code IamEnforcementFilter} looks the bucket policy up
+ * through {@code S3ResourcePolicySource} and evaluates it beside the caller's identity policies,
+ * with conditions and with AWS's cross-account rule. This class is what is left when there is no
+ * principal for that evaluator to match — an unsigned caller has no account, no identity policy
+ * and no ARN — so it answers the narrower question S3 asks without one: does the policy grant to
+ * everyone, or to this named service principal. {@code publicPolicyDecision} skipping a
+ * conditional Allow belongs to that question and to no other: a grant that holds only under a
+ * condition is not a public bucket. A signed caller's conditions are evaluated in full by the one
+ * evaluator.</p>
+ */
 final class S3PublicAccessEvaluator {
 
     private static final Logger LOG = Logger.getLogger(S3PublicAccessEvaluator.class);

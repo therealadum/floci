@@ -260,6 +260,33 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * The owning account of a bucket and the bucket policy attached to it, whatever account the
+     * request arrives in. Bucket names are globally unique on AWS, and the enforcement filter needs
+     * the owner to tell a same-account request from a cross-account one, so the search spans every
+     * account's partition regardless of {@code globalBucketNamespace} — which governs where data
+     * is read from, not who owns a bucket.
+     *
+     * @return the bucket's owner and policy, or empty when no bucket of that name exists
+     */
+    public Optional<BucketOwnerPolicy> bucketOwnerPolicy(String bucketName) {
+        if (bucketName == null || bucketName.isBlank() || bucketName.contains("*")) {
+            return Optional.empty();
+        }
+        if (bucketStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
+            return typed.findAnyAccountEntry(bucketName)
+                    .map(owned -> new BucketOwnerPolicy(owned.account(), owned.value().getPolicy()));
+        }
+        return bucketStore.get(bucketName)
+                .map(bucket -> new BucketOwnerPolicy(null, bucket.getPolicy()));
+    }
+
+    /** A bucket's owning account and its bucket policy, or null where it carries none. */
+    public record BucketOwnerPolicy(String ownerAccountId, String policy) {
+    }
+
     public void clear() {
         memoryDataStore.clear();
         memoryAnnotationStore.clear();

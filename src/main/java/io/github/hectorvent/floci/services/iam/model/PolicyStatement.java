@@ -6,7 +6,8 @@ import java.util.Map;
 /**
  * A single parsed statement from an IAM policy document.
  *
- * <p>Supports Phase 1 (actions, resources), Phase 4 (NotAction, NotResource, Condition).
+ * <p>Supports Phase 1 (actions, resources), Phase 4 (NotAction, NotResource, Condition), and
+ * the {@code Principal} and {@code NotPrincipal} a resource-based policy names its callers by.
  */
 public class PolicyStatement {
 
@@ -15,6 +16,11 @@ public class PolicyStatement {
     private final List<String> notActions;  // NotAction patterns; null when actions is set
     private final List<String> resources;   // resource ARN patterns; null when notResources is set
     private final List<String> notResources;// NotResource patterns; null when resources is set
+    // Principal: type ("AWS", "Service", "Federated", "CanonicalUser") → values. The shorthand
+    // forms "*" and ["*"] are normalized to AWS → ["*"]. Null when the statement names none,
+    // which every identity-based statement does.
+    private final Map<String, List<String>> principals;
+    private final Map<String, List<String>> notPrincipals;
     // Condition: outer key = operator (e.g. "StringEquals"), inner key = context key, value = list of values
     private final Map<String, Map<String, List<String>>> conditions;
 
@@ -24,11 +30,24 @@ public class PolicyStatement {
                            List<String> resources,
                            List<String> notResources,
                            Map<String, Map<String, List<String>>> conditions) {
+        this(effect, actions, notActions, resources, notResources, null, null, conditions);
+    }
+
+    public PolicyStatement(String effect,
+                           List<String> actions,
+                           List<String> notActions,
+                           List<String> resources,
+                           List<String> notResources,
+                           Map<String, List<String>> principals,
+                           Map<String, List<String>> notPrincipals,
+                           Map<String, Map<String, List<String>>> conditions) {
         this.effect = effect;
         this.actions = actions;
         this.notActions = notActions;
         this.resources = resources;
         this.notResources = notResources;
+        this.principals = principals;
+        this.notPrincipals = notPrincipals;
         this.conditions = conditions;
     }
 
@@ -42,6 +61,8 @@ public class PolicyStatement {
     public List<String> getNotActions()    { return notActions; }
     public List<String> getResources()     { return resources; }
     public List<String> getNotResources()  { return notResources; }
+    public Map<String, List<String>> getPrincipals()    { return principals; }
+    public Map<String, List<String>> getNotPrincipals() { return notPrincipals; }
     public Map<String, Map<String, List<String>>> getConditions() { return conditions; }
 
     public boolean isDeny()  { return "Deny".equalsIgnoreCase(effect); }

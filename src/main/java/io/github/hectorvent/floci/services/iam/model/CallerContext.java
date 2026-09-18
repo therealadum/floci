@@ -15,27 +15,45 @@ import java.util.List;
  *       path, account). An action must be allowed at every level and denied at none.
  *       {@code null} when SCPs don't apply (no organization, management account, or SCP
  *       enforcement disabled).</li>
+ *   <li>{@code principal} — the principal the request arrives as, which a resource policy's
+ *       {@code Principal} is matched against and whose account decides same-account from
+ *       cross-account. {@code null} when the caller could not be identified, which leaves the
+ *       decision to the identity policies alone.</li>
  * </ul>
  */
 public record CallerContext(
         List<String> identityPolicies,
         String sessionPolicyDocument,
         String boundaryPolicyDocument,
-        List<List<String>> scpLevels
+        List<List<String>> scpLevels,
+        RequestPrincipal principal
 ) {
     /** Source-compatible constructor for callers predating SCP support. */
     public CallerContext(List<String> identityPolicies, String sessionPolicyDocument,
                          String boundaryPolicyDocument) {
-        this(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, null);
+        this(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, null, null);
     }
 
-    /** Convenience factory: no session policy, no boundary, no SCPs. */
+    /** Source-compatible constructor for callers predating resource-policy support. */
+    public CallerContext(List<String> identityPolicies, String sessionPolicyDocument,
+                         String boundaryPolicyDocument, List<List<String>> scpLevels) {
+        this(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, scpLevels, null);
+    }
+
+    /** Convenience factory: no session policy, no boundary, no SCPs, no identified principal. */
     public static CallerContext of(List<String> identityPolicies) {
-        return new CallerContext(identityPolicies, null, null, null);
+        return new CallerContext(identityPolicies, null, null, null, null);
     }
 
     /** Copy of this context with the effective SCP levels attached. */
     public CallerContext withScpLevels(List<List<String>> levels) {
-        return new CallerContext(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, levels);
+        return new CallerContext(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument,
+                levels, principal);
+    }
+
+    /** Copy of this context with the request's principal attached. */
+    public CallerContext withPrincipal(RequestPrincipal requestPrincipal) {
+        return new CallerContext(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument,
+                scpLevels, requestPrincipal);
     }
 }

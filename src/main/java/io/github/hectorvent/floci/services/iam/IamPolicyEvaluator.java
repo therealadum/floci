@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.PolicyStatement;
+import io.github.hectorvent.floci.services.iam.model.RequestPrincipal;
+import io.github.hectorvent.floci.services.iam.model.ResourcePolicies;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -68,22 +70,26 @@ public class IamPolicyEvaluator {
     /**
      * Full evaluation including resource policies, session policy, boundary, and conditions.
      *
-     * @param caller        identity context (identity policies, optional session policy, optional boundary)
-     * @param resourcePolicies resource-based policy documents (Phase 2); may be null or empty
+     * @param caller        identity context (identity policies, optional session policy, optional
+     *                      boundary, and the principal the request arrives as)
+     * @param resourcePolicies the resource's own policies, its owning account, and whether they are
+     *                      the root of authority over it; may be null when the resource has no
+     *                      lookup, which leaves the decision to the identity policies alone
      * @param action        IAM action, e.g. "s3:GetObject"
      * @param resource      resource ARN, e.g. "arn:aws:s3:::my-bucket/key"
      * @param conditionCtx  condition context key → values; may be null or empty
      * @return {@link Decision#ALLOW} or {@link Decision#DENY}
      */
     public Decision evaluate(CallerContext caller,
-                             List<String> resourcePolicies,
+                             ResourcePolicies resourcePolicies,
                              String action,
                              String resource,
                              Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
 
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
-        List<PolicyStatement> resourceStmts = resourcePolicies == null ? List.of() : parseAll(resourcePolicies);
+        List<PolicyStatement> resourceStmts = resourcePolicies == null
+                ? List.of() : parseAll(resourcePolicies.documents());
         List<PolicyStatement> sessionStmts  = caller.sessionPolicyDocument() == null
                 ? null : parseAll(List.of(caller.sessionPolicyDocument()));
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
@@ -97,18 +103,33 @@ public class IamPolicyEvaluator {
             return Decision.DENY;
         }
 
-        // 1. Explicit deny in ANY policy → DENY immediately
+        RequestPrincipal principal = caller.principal();
+
+        // 1. Explicit deny in ANY policy → DENY immediately. A resource policy's deny counts only
+        //    where the statement names this caller: a deny aimed at someone else is not this
+        //    caller's deny.
         if (anyExplicitDeny(identityStmts, action, resource, ctx)
-                || anyExplicitDeny(resourceStmts, action, resource, ctx)
+                || anyResourceDeny(resourceStmts, principal, action, resource, ctx)
                 || (sessionStmts  != null && anyExplicitDeny(sessionStmts,  action, resource, ctx))
                 || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, action, resource, ctx))) {
             return Decision.DENY;
         }
 
-        // 2. Base grant: identity OR resource-based policy must allow
+        // 2. Base grant. AWS reads the two kinds of policy together, and how it reads them
+        //    depends on the resource, not on the action:
+        //
+        //    - Inside the resource's own account, either policy suffices — but a resource policy
+        //      naming only an account delegates to that account's IAM rather than granting, so it
+        //      still needs an identity policy behind it.
+        //    - Across accounts both must allow: the resource's policy in the account that owns it,
+        //      and the caller's identity policy in the account that owns the caller.
+        //    - A KMS key policy is the root of authority over its key. An identity policy grants
+        //      on a key only where the key policy delegates to the account, which is what the
+        //      arn:aws:iam::<account>:root statement of the default key policy does.
         boolean identityAllow = anyExplicitAllow(identityStmts, action, resource, ctx);
-        boolean resourceAllow = anyExplicitAllow(resourceStmts, action, resource, ctx);
-        if (!identityAllow && !resourceAllow) {
+        PrincipalMatcher.Match resourceAllow =
+                strongestResourceAllow(resourceStmts, principal, action, resource, ctx);
+        if (!baseGrant(resourcePolicies, principal, identityAllow, resourceAllow)) {
             return Decision.DENY;
         }
 
@@ -169,6 +190,89 @@ public class IamPolicyEvaluator {
             return SimulationDecision.IMPLICIT_DENY;
         }
         return SimulationDecision.ALLOWED;
+    }
+
+    /**
+     * Whether the resource and identity policies together grant the request, before the session
+     * policy and the permissions boundary cap it.
+     */
+    private boolean baseGrant(ResourcePolicies resourcePolicies,
+                              RequestPrincipal principal,
+                              boolean identityAllow,
+                              PrincipalMatcher.Match resourceAllow) {
+        boolean directAllow = resourceAllow == PrincipalMatcher.Match.DIRECT;
+        boolean anyResourceAllow = resourceAllow != PrincipalMatcher.Match.NONE;
+
+        if (sameAccount(resourcePolicies, principal)) {
+            if (isRootOfAuthority(resourcePolicies)) {
+                return directAllow || (anyResourceAllow && identityAllow);
+            }
+            return directAllow || identityAllow;
+        }
+        // Across accounts the trusting account's resource policy and the trusted account's
+        // identity policy must both allow, whichever form the resource policy names the caller by.
+        return anyResourceAllow && identityAllow;
+    }
+
+    /**
+     * A request is cross-account only when both the resource's owning account and the caller's
+     * account are known and differ. An unknown owner — a service whose resources have no policy
+     * lookup yet — is treated as the caller's own, which leaves that service's behaviour to the
+     * identity policies exactly as before.
+     */
+    private boolean sameAccount(ResourcePolicies resourcePolicies, RequestPrincipal principal) {
+        if (resourcePolicies == null || resourcePolicies.ownerAccountId() == null
+                || principal == null || principal.accountId() == null) {
+            return true;
+        }
+        return resourcePolicies.ownerAccountId().equals(principal.accountId());
+    }
+
+    /**
+     * A key policy is the root of authority only where one was actually found. A key whose policy
+     * could not be read falls back to identity-policy evaluation rather than refusing every
+     * caller, because an absent document is a lookup gap, not a key that grants nothing.
+     */
+    private boolean isRootOfAuthority(ResourcePolicies resourcePolicies) {
+        return resourcePolicies != null && resourcePolicies.rootOfAuthority() && !resourcePolicies.isEmpty();
+    }
+
+    private boolean anyResourceDeny(List<PolicyStatement> stmts, RequestPrincipal principal,
+                                    String action, String resource, Map<String, List<String>> ctx) {
+        for (PolicyStatement stmt : stmts) {
+            if (stmt.isDeny()
+                    && PrincipalMatcher.match(stmt, principal) != PrincipalMatcher.Match.NONE
+                    && matchesStatement(stmt, action, resource, ctx)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The strongest way any allowing statement of the resource policy names this caller:
+     * {@link PrincipalMatcher.Match#DIRECT} when one names the caller itself,
+     * {@link PrincipalMatcher.Match#ACCOUNT} when one names only its account, and
+     * {@link PrincipalMatcher.Match#NONE} when none applies.
+     */
+    private PrincipalMatcher.Match strongestResourceAllow(List<PolicyStatement> stmts,
+                                                          RequestPrincipal principal,
+                                                          String action, String resource,
+                                                          Map<String, List<String>> ctx) {
+        PrincipalMatcher.Match strongest = PrincipalMatcher.Match.NONE;
+        for (PolicyStatement stmt : stmts) {
+            if (!stmt.isAllow() || !matchesStatement(stmt, action, resource, ctx)) {
+                continue;
+            }
+            PrincipalMatcher.Match match = PrincipalMatcher.match(stmt, principal);
+            if (match == PrincipalMatcher.Match.DIRECT) {
+                return PrincipalMatcher.Match.DIRECT;
+            }
+            if (match == PrincipalMatcher.Match.ACCOUNT) {
+                strongest = PrincipalMatcher.Match.ACCOUNT;
+            }
+        }
+        return strongest;
     }
 
     /**
@@ -610,6 +714,8 @@ public class IamPolicyEvaluator {
         List<String> notActions  = nodeToList(stmt.get("NotAction"));
         List<String> resources   = nodeToList(stmt.get("Resource"));
         List<String> notResources= nodeToList(stmt.get("NotResource"));
+        Map<String, List<String>> principals    = parsePrincipals(stmt.get("Principal"));
+        Map<String, List<String>> notPrincipals = parsePrincipals(stmt.get("NotPrincipal"));
         Map<String, Map<String, List<String>>> conditions = parseConditions(stmt.get("Condition"));
         return new PolicyStatement(
                 effect,
@@ -617,7 +723,45 @@ public class IamPolicyEvaluator {
                 notActions.isEmpty()  ? null : notActions,
                 resources.isEmpty()   ? null : resources,
                 notResources.isEmpty()? null : notResources,
+                principals,
+                notPrincipals,
                 conditions);
+    }
+
+    /**
+     * Parses a {@code Principal} or {@code NotPrincipal} into type → values.
+     *
+     * <p>The shorthand forms {@code "*"} and {@code ["*"]} are normalized to {@code AWS → ["*"]}.
+     * On AWS the bare form also admits an anonymous caller while {@code {"AWS":"*"}} does not, a
+     * difference that cannot show here: an unsigned request carries no principal and never
+     * reaches policy evaluation.
+     *
+     * @return the parsed principals, or {@code null} when the statement carries none — which is
+     *         every identity-based statement.
+     */
+    private Map<String, List<String>> parsePrincipals(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        if (node.isTextual() || node.isArray()) {
+            List<String> values = nodeToList(node);
+            if (values.isEmpty()) {
+                return null;
+            }
+            result.put("AWS", values);
+            return result;
+        }
+        if (!node.isObject()) {
+            return null;
+        }
+        node.fields().forEachRemaining(entry -> {
+            List<String> values = nodeToList(entry.getValue());
+            if (!values.isEmpty()) {
+                result.put(entry.getKey(), values);
+            }
+        });
+        return result.isEmpty() ? null : result;
     }
 
     private Map<String, Map<String, List<String>>> parseConditions(JsonNode condNode) {
