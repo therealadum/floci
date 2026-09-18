@@ -85,6 +85,24 @@ public class IamPolicyEvaluator {
                              String action,
                              String resource,
                              Map<String, List<String>> conditionCtx) {
+        return evaluate(caller, resourcePolicies, null, action, resource, conditionCtx);
+    }
+
+    /**
+     * Full evaluation with the resource's own organization ceiling as well.
+     *
+     * @param rcpLevels the effective resource control policies of the account that owns the
+     *                  resource, one list of documents per organization level, or {@code null}
+     *                  when none apply. They bound what any principal may do to the resource and
+     *                  never grant.
+     * @see #evaluate(CallerContext, ResourcePolicies, String, String, Map)
+     */
+    public Decision evaluate(CallerContext caller,
+                             ResourcePolicies resourcePolicies,
+                             List<List<String>> rcpLevels,
+                             String action,
+                             String resource,
+                             Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
 
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
@@ -104,6 +122,13 @@ public class IamPolicyEvaluator {
         }
 
         RequestPrincipal principal = caller.principal();
+
+        // 0b. Resource control policies gate everything too, from the other side: they come from
+        //     the organization of the account that owns the resource, not the caller's, and they
+        //     bound every principal alike — the owning account's own and outside ones.
+        if (!rcpAllows(rcpLevels, principal, action, resource, ctx)) {
+            return Decision.DENY;
+        }
 
         // 1. Explicit deny in ANY policy → DENY immediately. A resource policy's deny counts only
         //    where the statement names this caller: a deny aimed at someone else is not this
@@ -302,6 +327,43 @@ public class IamPolicyEvaluator {
             }
             if (anyExplicitDeny(levelStmts, action, resource, ctx)
                     || !anyExplicitAllow(levelStmts, action, resource, ctx)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Resource control policy evaluation: at every organization level of the account that owns
+     * the resource, the action must be explicitly allowed and explicitly denied at none, which is
+     * how a policy that only ever takes away still lets everything else through — the
+     * RCPFullAWSAccess the enabled policy type attaches is the allow at each level.
+     *
+     * <p>A resource control policy statement names a {@code Principal}, so a statement applies
+     * only where it names this caller, exactly as a resource policy's does. A statement carrying
+     * none applies to nobody, and a caller this filter could not identify is left to the rest of
+     * the evaluation rather than refused by a ceiling that cannot be read against it.
+     *
+     * <p>A level holding an unparseable document denies, for the reason {@link #scpAllows} gives.
+     */
+    private boolean rcpAllows(List<List<String>> rcpLevels, RequestPrincipal principal,
+                              String action, String resource, Map<String, List<String>> ctx) {
+        if (rcpLevels == null || principal == null) {
+            return true;
+        }
+        for (List<String> level : rcpLevels) {
+            ParsedDocuments parsed = parseAllTracked(level);
+            if (parsed.anyFailed()) {
+                return false;
+            }
+            List<PolicyStatement> applicable = parsed.statements().stream()
+                    .filter(stmt -> PrincipalMatcher.match(stmt, principal) != PrincipalMatcher.Match.NONE)
+                    .toList();
+            if (applicable.isEmpty()) {
+                continue;
+            }
+            if (anyExplicitDeny(applicable, action, resource, ctx)
+                    || !anyExplicitAllow(applicable, action, resource, ctx)) {
                 return false;
             }
         }

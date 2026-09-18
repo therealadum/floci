@@ -330,6 +330,7 @@ environment:
 Policy evaluation follows the standard AWS precedence:
 
 1. If [SCP enforcement](#service-control-policies-scps) is active, the action must be allowed at **every** organization level (root, OUs on the path, account) and explicitly denied at none — otherwise the request is denied before identity policies are consulted
+1b. If [resource control policies](#resource-control-policies-rcps) apply to the account that owns the resource, the same must hold down **that** account's organization chain — otherwise the request is denied
 2. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
 3. An explicit **Allow** in an identity policy creates the base grant
 4. If a session policy is present, it must also explicitly allow the request
@@ -367,6 +368,56 @@ and nothing else does** — no identity policies, permission boundary, or sessio
 attaches to the bare account key. Identity-policy enforcement of a member account still
 requires an assumable, account-routable identity such as the `OrganizationAccountAccessRole`
 session.
+
+### Resource control policies (RCPs)
+
+Resource control policies are the other half of the organization ceiling and run under the **same
+flag**, `floci.services.organizations.scp-enforcement-enabled` (env
+`FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED`). The key keeps its original name although
+it now covers both kinds of control policy.
+
+Where an SCP comes from the **caller's** organization chain, an RCP comes from the chain of the
+account that **owns the resource**. It bounds what any principal may do to that account's
+resources — the account's own principals and outside ones alike — and, like an SCP, never grants:
+the action must be explicitly allowed at every level of the owning account's chain and denied at
+none.
+
+| | Service control policy | Resource control policy |
+|---|---|---|
+| Chain read from | The caller's account | The account that owns the resource |
+| Statements carry a `Principal` | No | Yes, and one that does not name the caller does not apply |
+| Default policy | `FullAWSAccess` | `RCPFullAWSAccess`, created when the type is enabled |
+| Management account | Exempt | Its resources are exempt |
+| Service-linked roles | Bound | Exempt, as on AWS |
+
+AWS supports resource control policies for a closed list of services. Floci carries no vendored
+copy of that list, so it names the five AWS documents today: **S3, STS, KMS, SQS and Secrets
+Manager**. For STS the resource is the role being assumed, which is how an RCP on a unit refuses
+an `AssumeRole` from a principal outside that unit's organization path.
+
+The resource's owning account is the one the resource policy lookup already finds — the only
+source for an S3 ARN, which carries no account — falling back to the account named in the ARN
+itself. When neither says, no RCP applies and the resource condition keys are absent.
+
+### Organization and account condition keys
+
+Every request carries the keys that describe its caller, and one set per resource it names:
+
+| Key | Value |
+|---|---|
+| `aws:PrincipalArn` | The caller's own ARN |
+| `aws:PrincipalAccount` | The account the caller belongs to |
+| `aws:PrincipalOrgID` | `o-<org>`, when that account is in an organization |
+| `aws:PrincipalOrgPaths` | `o-<org>/r-<root>/ou-<ou>/.../<account>/`, trailing slash included; multi-valued, with one value |
+| `aws:ResourceAccount` | The account that owns the resource |
+| `aws:ResourceOrgID` | That account's organization id |
+| `aws:ResourceOrgPaths` | That account's organization path, in the same form |
+
+The path form is AWS's own, and the same string the Organizations API reports as an OU's `Path`
+and as the single entry of an account's `Paths`. An account in no organization carries none of the
+organization keys, exactly as on AWS; the management account carries them. A request naming
+several resources gets one set of resource keys per resource, so a policy condition must hold for
+each of them.
 
 ### What enforcement allows
 

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -58,6 +59,7 @@ public class ResourceArnBuilder {
             case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "kms"            -> List.of(buildKmsArn(ctx, path, region, accountId));
+            case "sts"            -> List.of(buildStsArn(ctx));
             default               -> List.of("*");
         };
     }
@@ -362,6 +364,21 @@ public class ResourceArnBuilder {
         }
         String keyId = json.get("KeyId").asText().trim();
         return keyId.isEmpty() ? null : keyId;
+    }
+
+    // ── STS ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * The resource of an {@code AssumeRole} is the role being assumed, which is what lets a
+     * policy on the role's own account — a resource control policy among them — say who may
+     * assume it. Every other STS action names no resource and answers {@code *}.
+     */
+    private String buildStsArn(ContainerRequestContext ctx) {
+        String roleArn = IamConditionContextResolver.formParameters(ctx).get("RoleArn");
+        if (roleArn == null) {
+            roleArn = firstFormParam(ctx, "RoleArn");
+        }
+        return roleArn == null || roleArn.isBlank() ? "*" : roleArn.trim();
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

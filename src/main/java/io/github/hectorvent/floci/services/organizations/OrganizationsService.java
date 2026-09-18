@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.OrganizationProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
+import io.github.hectorvent.floci.services.iam.model.AccountOrganization;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
 import io.github.hectorvent.floci.services.organizations.model.HandshakeParty;
@@ -54,7 +56,7 @@ import java.util.regex.Pattern;
  * @see <a href="https://docs.aws.amazon.com/organizations/latest/APIReference/Welcome.html">AWS Organizations API Reference</a>
  */
 @ApplicationScoped
-public class OrganizationsService implements ScpProvider {
+public class OrganizationsService implements ScpProvider, OrganizationProvider {
 
     private static final Logger LOG = Logger.getLogger(OrganizationsService.class);
 
@@ -65,7 +67,19 @@ public class OrganizationsService implements ScpProvider {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
 
     static final String SERVICE_CONTROL_POLICY = "SERVICE_CONTROL_POLICY";
-    private static final String RESOURCE_CONTROL_POLICY = "RESOURCE_CONTROL_POLICY";
+    static final String RESOURCE_CONTROL_POLICY = "RESOURCE_CONTROL_POLICY";
+
+    /**
+     * AWS's default resource control policy. Enabling the {@code RESOURCE_CONTROL_POLICY} type
+     * creates it and attaches it to the root, every OU and every account, so that enabling the
+     * type does not by itself deny everything; every target created afterwards gets it too.
+     * A resource control policy statement carries a {@code Principal}, which is what tells it
+     * apart from a service control policy's.
+     */
+    static final String RCP_FULL_AWS_ACCESS_POLICY_ID = "p-RCPFullAWSAccess";
+    private static final String RCP_FULL_AWS_ACCESS_CONTENT =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"RCPFullAWSAccess\","
+                    + "\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
 
     /**
      * Policy types AWS accepts on CreatePolicy and Enable/DisablePolicyType.
@@ -430,7 +444,7 @@ public class OrganizationsService implements ScpProvider {
         }
         organizationalUnits.putForAccount(organization.getMasterAccountId(), ouId, unit);
 
-        attachFullAwsAccess(organization, ouId);
+        attachDefaultPolicies(organization, ouId);
         return unit;
     }
 
@@ -497,7 +511,11 @@ public class OrganizationsService implements ScpProvider {
      * entry of {@code Account.Paths}, and what {@code Fn::GetAtt} returns for the same keys.
      */
     public String organizationPath(String callerAccountId, String resourceId) {
-        Organization organization = requireOrganizationForCaller(callerAccountId);
+        return organizationPathIn(requireOrganizationForCaller(callerAccountId), resourceId);
+    }
+
+    /** The one writer of the path form, shared by the API and the organization condition keys. */
+    private String organizationPathIn(Organization organization, String resourceId) {
         return organization.getId() + "/" + String.join("/", ancestryOf(organization, resourceId)) + "/";
     }
 
@@ -556,7 +574,7 @@ public class OrganizationsService implements ScpProvider {
         String newAccountId = allocateAccountId(organization);
         OrganizationAccount account = newMemberAccount(organization, newAccountId, email, accountName, "CREATED");
         accounts.putForAccount(organization.getMasterAccountId(), newAccountId, account);
-        attachFullAwsAccess(organization, newAccountId);
+        attachDefaultPolicies(organization, newAccountId);
         createEntryRole(newAccountId, entryRoleName, organization.getMasterAccountId());
 
         status.setState("SUCCEEDED");
@@ -864,6 +882,9 @@ public class OrganizationsService implements ScpProvider {
             root.getPolicyTypes().add(new PolicyTypeSummary(policyType, "ENABLED"));
         }
         organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        if (RESOURCE_CONTROL_POLICY.equals(policyType)) {
+            createRcpFullAwsAccessPolicy(organization);
+        }
         return root;
     }
 
@@ -1007,28 +1028,63 @@ public class OrganizationsService implements ScpProvider {
      */
     @Override
     public List<List<String>> effectiveScpLevels(String accountId) {
-        if (!scpEnforcementEnabled) {
+        return effectiveControlPolicyLevels(accountId, SERVICE_CONTROL_POLICY);
+    }
+
+    // ──────────────────────────── Organization provider ────────────────────────────
+
+    /** {@inheritDoc} */
+    @Override
+    public Optional<AccountOrganization> organizationOf(String accountId) {
+        if (accountId == null || accountId.isBlank()) {
+            return Optional.empty();
+        }
+        return findOrganizationForAccount(accountId).map(organization -> new AccountOrganization(
+                organization.getId(),
+                organizationPathIn(organization, accountId),
+                accountId.equals(organization.getMasterAccountId())));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Levels are ordered root → OUs on the path → account, the same shape
+     * {@link #effectiveScpLevels} returns, and read the same way: the action must be allowed at
+     * every level and denied at none. The account here is the one that <em>owns the resource</em>,
+     * not the caller's.</p>
+     */
+    @Override
+    public List<List<String>> effectiveRcpLevels(String resourceAccountId) {
+        return effectiveControlPolicyLevels(resourceAccountId, RESOURCE_CONTROL_POLICY);
+    }
+
+    /**
+     * The documents of one control policy type down the owning account's chain, or {@code null}
+     * when that type does not bound the account: enforcement off, no organization, the management
+     * account, or the type not enabled on the root.
+     */
+    private List<List<String>> effectiveControlPolicyLevels(String accountId, String policyType) {
+        if (!scpEnforcementEnabled || accountId == null || accountId.isBlank()) {
             return null;
         }
-        Organization organization;
-        try {
-            organization = requireOrganizationForCaller(accountId);
-        } catch (AwsException e) {
+        Optional<Organization> found = findOrganizationForAccount(accountId);
+        if (found.isEmpty()) {
             return null;
         }
+        Organization organization = found.get();
         if (accountId.equals(organization.getMasterAccountId())) {
             return null;
         }
-        boolean scpEnabled = organization.getRoot().getPolicyTypes().stream()
-                .anyMatch(t -> SERVICE_CONTROL_POLICY.equals(t.getType()) && "ENABLED".equals(t.getStatus()));
-        if (!scpEnabled) {
+        boolean typeEnabled = organization.getRoot().getPolicyTypes().stream()
+                .anyMatch(t -> policyType.equals(t.getType()) && "ENABLED".equals(t.getStatus()));
+        if (!typeEnabled) {
             return null;
         }
         List<OrganizationPolicy> organizationPolicies = policiesIn(organization);
         List<List<String>> levels = new ArrayList<>();
         for (String node : ancestryOf(organization, accountId)) {
             List<String> documents = organizationPolicies.stream()
-                    .filter(policy -> SERVICE_CONTROL_POLICY.equals(policy.getType())
+                    .filter(policy -> policyType.equals(policy.getType())
                             && policy.getTargets().contains(node))
                     .map(OrganizationPolicy::getContent)
                     .toList();
@@ -1296,7 +1352,7 @@ public class OrganizationsService implements ScpProvider {
             OrganizationAccount account = newMemberAccount(
                     organization, callerAccountId, email, "invited-" + callerAccountId, "INVITED");
             accounts.putForAccount(organization.getMasterAccountId(), callerAccountId, account);
-            attachFullAwsAccess(organization, callerAccountId);
+            attachDefaultPolicies(organization, callerAccountId);
             handshake.setTargetAccountId(callerAccountId);
         }
 
@@ -1715,14 +1771,43 @@ public class OrganizationsService implements ScpProvider {
     }
 
     /**
-     * AWS attaches FullAWSAccess to every new OU and account so the target is not implicitly
-     * denied everything the moment it is created.
+     * Creates RCPFullAWSAccess and attaches it to the root, every OU and every account, which is
+     * what AWS does the moment the {@code RESOURCE_CONTROL_POLICY} type is enabled. Without it
+     * every target would sit at a level with no allow statement and be denied everything.
      */
-    private void attachFullAwsAccess(Organization organization, String targetId) {
-        policies.getForAccount(organization.getMasterAccountId(), FULL_AWS_ACCESS_POLICY_ID)
+    private void createRcpFullAwsAccessPolicy(Organization organization) {
+        String master = organization.getMasterAccountId();
+        OrganizationPolicy policy = policies.getForAccount(master, RCP_FULL_AWS_ACCESS_POLICY_ID)
+                .orElseGet(OrganizationPolicy::new);
+        policy.setId(RCP_FULL_AWS_ACCESS_POLICY_ID);
+        policy.setName("RCPFullAWSAccess");
+        policy.setDescription("Allows access to every operation on every resource");
+        policy.setType(RESOURCE_CONTROL_POLICY);
+        policy.setAwsManaged(true);
+        policy.setContent(RCP_FULL_AWS_ACCESS_CONTENT);
+        policy.setOrganizationId(organization.getId());
+        policy.setArn(policyArn(organization, RCP_FULL_AWS_ACCESS_POLICY_ID, RESOURCE_CONTROL_POLICY));
+        policy.getTargets().add(organization.getRoot().getId());
+        organizationalUnitsIn(organization).forEach(unit -> policy.getTargets().add(unit.getId()));
+        accountsIn(organization).forEach(account -> policy.getTargets().add(account.getId()));
+        policies.putForAccount(master, RCP_FULL_AWS_ACCESS_POLICY_ID, policy);
+    }
+
+    /**
+     * AWS attaches the default policy of every enabled access-control type to a new OU or account
+     * so the target is not implicitly denied everything the moment it is created: FullAWSAccess
+     * always, and RCPFullAWSAccess once the resource control policy type has been enabled.
+     */
+    private void attachDefaultPolicies(Organization organization, String targetId) {
+        attachDefaultPolicy(organization, FULL_AWS_ACCESS_POLICY_ID, targetId);
+        attachDefaultPolicy(organization, RCP_FULL_AWS_ACCESS_POLICY_ID, targetId);
+    }
+
+    private void attachDefaultPolicy(Organization organization, String policyId, String targetId) {
+        policies.getForAccount(organization.getMasterAccountId(), policyId)
                 .ifPresent(policy -> {
                     policy.getTargets().add(targetId);
-                    policies.putForAccount(organization.getMasterAccountId(), FULL_AWS_ACCESS_POLICY_ID, policy);
+                    policies.putForAccount(organization.getMasterAccountId(), policyId, policy);
                 });
     }
 

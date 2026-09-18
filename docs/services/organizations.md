@@ -36,6 +36,9 @@ call `LeaveOrganization`. An account in no organization gets
 - The AWS-managed `p-FullAWSAccess` SCP is created with the organization and attached to the
   root, every new OU and every new account. Detaching the last service control policy from a
   target is rejected with `ConstraintViolationException`, as on AWS.
+- The AWS-managed `p-RCPFullAWSAccess` resource control policy is created the moment
+  `EnablePolicyType` enables `RESOURCE_CONTROL_POLICY`, attached to the root, every existing OU
+  and every existing account, and to every OU and account created afterwards.
 - A new root has no policy type enabled, whatever the feature set. `EnablePolicyType` and
   `DisablePolicyType` are the only writers of that list, so `ListRoots` reports exactly what they
   set, and a policy of a type that is not enabled on the root can be neither created nor attached.
@@ -130,12 +133,16 @@ call `LeaveOrganization`. An account in no organization gets
 | Environment variable | Default | Description |
 | --- | --- | --- |
 | `FLOCI_SERVICES_ORGANIZATIONS_ENABLED` | `true` | Enables the service |
-| `FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED` | `false` | When `true` (and IAM enforcement is enabled), attached service control policies participate in IAM policy evaluation |
+| `FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED` | `false` | Organization policy enforcement. When `true` (and IAM enforcement is enabled), attached service control policies **and resource control policies** participate in IAM policy evaluation. The variable keeps its original name although it now covers both kinds |
 | `FLOCI_SERVICES_ORGANIZATIONS_MANAGEMENT_ACCOUNT_EMAIL` | unset | Email reported for the organization's management account (`DescribeOrganization` master account, `ListAccounts`). Unset falls back to the built-in default |
 | `FLOCI_STORAGE_SERVICES_ORGANIZATIONS_MODE` | inherits `FLOCI_STORAGE_MODE` | Storage mode override |
 | `FLOCI_STORAGE_SERVICES_ORGANIZATIONS_FLUSH_INTERVAL_MS` | `5000` | Hybrid/WAL flush interval |
 
-## SCP enforcement
+## Organization policy enforcement
+
+`FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED` is the one flag for both access-control
+policy types. It keeps its original name; what it covers is service control policies **and**
+resource control policies.
 
 With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` and
 `FLOCI_SERVICES_ORGANIZATIONS_SCP_ENFORCEMENT_ENABLED=true`, service control policies attached to
@@ -144,6 +151,16 @@ level of the account's chain, before the caller's identity policies are consulte
 permissions on their own. See
 [Service Control Policies (SCPs)](iam.md#service-control-policies-scps) for the evaluation order,
 the account-root behaviour, and the cases that bypass enforcement.
+
+Resource control policies are evaluated under the same flag, from the other side: they come from
+the organization of the account that **owns the resource**, not the caller's, and they bound what
+any principal may do to that account's resources — the account's own principals and outside ones
+alike. See [Resource control policies (RCPs)](iam.md#resource-control-policies-rcps).
+
+Enabling the `RESOURCE_CONTROL_POLICY` type on the root creates the AWS-managed
+`RCPFullAWSAccess` policy and attaches it to the root, every OU and every account, as AWS does,
+and every OU and account created afterwards gets it too. Without it every target would sit at a
+level with no allow statement and be denied everything.
 
 The evaluation itself lives in the IAM enforcement layer — this service stores the policies and
 resolves the chain, but with IAM enforcement off the flag has no effect.

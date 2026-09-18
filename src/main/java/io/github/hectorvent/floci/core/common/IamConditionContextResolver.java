@@ -265,7 +265,10 @@ public class IamConditionContextResolver {
      * resource this context describes is the resource the handler acts on.
      */
     @SuppressWarnings("unchecked")
-    private static Map<String, String> formParameters(ContainerRequestContext ctx) {
+    // Public because ResourceArnBuilder reads the same form body to find the resource a Query
+    // request names, and both must read it through the one buffer: the entity stream can only be
+    // consumed once, and whichever runs first caches the parsed parameters on the request.
+    public static Map<String, String> formParameters(ContainerRequestContext ctx) {
         Object cached = ctx.getProperty(BUFFERED_FORM_BODY);
         if (cached instanceof Map<?, ?> map) {
             return (Map<String, String>) map;

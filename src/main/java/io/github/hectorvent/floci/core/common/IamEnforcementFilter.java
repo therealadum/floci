@@ -6,9 +6,11 @@ import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.OrganizationProvider;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyLookup;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
+import io.github.hectorvent.floci.services.iam.model.AccountOrganization;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.model.ResourcePolicies;
@@ -28,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -82,6 +85,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private static final String ROOT_ALLOW_ALL =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
 
+    /**
+     * The services AWS supports resource control policies for, by credential scope. AWS names a
+     * closed list rather than every service; this emulator carries no vendored copy of it, so the
+     * five AWS documents today are named here and a sixth is added when AWS adds one.
+     */
+    private static final Set<String> RESOURCE_CONTROL_POLICY_SCOPES =
+            Set.of("s3", "sts", "kms", "sqs", "secretsmanager");
+
+    /** An IAM role under this path is a service-linked role, which resource control policies exempt. */
+    private static final String SERVICE_LINKED_ROLE_PATH = ":role/aws-service-role/";
+
     private final EmulatorConfig config;
     private final AccountResolver accountResolver;
     private final IamService iamService;
@@ -94,6 +108,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final CurrentVertxRequest currentVertxRequest;
     private final ResolvedServiceCatalog catalog;
     private final Instance<ScpProvider> scpProvider;
+    private final Instance<OrganizationProvider> organizationProvider;
     private final SessionAccountLookup sessionAccountLookup;
     private final ResourcePolicyLookup resourcePolicyLookup;
 
@@ -110,6 +125,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 CurrentVertxRequest currentVertxRequest,
                                 ResolvedServiceCatalog catalog,
                                 Instance<ScpProvider> scpProvider,
+                                Instance<OrganizationProvider> organizationProvider,
                                 SessionAccountLookup sessionAccountLookup,
                                 ResourcePolicyLookup resourcePolicyLookup) {
         this.config = config;
@@ -124,6 +140,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.currentVertxRequest = currentVertxRequest;
         this.catalog = catalog;
         this.scpProvider = scpProvider;
+        this.organizationProvider = organizationProvider;
         this.sessionAccountLookup = sessionAccountLookup;
         this.resourcePolicyLookup = resourcePolicyLookup;
     }
@@ -227,25 +244,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ? RequestPrincipal.accountRoot(accountId)
                 : iamService.resolveCallerPrincipal(akid).orElse(null);
         caller = caller.withPrincipal(principal);
-        Optional<String> principalArn = principal == null
-                ? Optional.empty()
-                : Optional.ofNullable(principal.arn());
-        if (principalArn.isPresent()) {
-            conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
-            conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
-        }
+        // The principal keys describe the caller and so are the same for every resource the
+        // request names: aws:PrincipalArn, and aws:PrincipalAccount with the organization keys
+        // aws:PrincipalOrgID and aws:PrincipalOrgPaths. They are set here rather than in
+        // IamConditionContextResolver because that resolver answers per service and these apply
+        // to every request, whatever the service.
+        Map<String, List<String>> principalKeys = principalConditionKeys(principal, accountId);
         List<Map<String, List<String>>> targetContexts = new ArrayList<>();
-        targetContexts.add(conditionContext);
+        targetContexts.add(withKeys(conditionContext, principalKeys));
         for (Map<String, List<String>> target : remainingTargets) {
-            Map<String, List<String>> targetContext = new HashMap<>(target);
-            principalArn.ifPresent(arn -> targetContext.put("aws:PrincipalArn", List.of(arn)));
-            targetContexts.add(targetContext);
+            targetContexts.add(withKeys(target, principalKeys));
         }
 
         for (String resource : resources) {
             ResourcePolicies resourcePolicies = resourcePolicyLookup.policiesFor(resource);
+            // One request may name several resources, each owned by its own account, so the
+            // resource keys and the resource's own organization ceiling are resolved per resource.
+            String resourceAccountId = resourceAccountOf(resourcePolicies, resource);
+            Map<String, List<String>> resourceKeys = resourceConditionKeys(resourceAccountId);
+            List<List<String>> rcpLevels =
+                    resourceControlPolicyLevels(credentialScope, resourceAccountId, principal);
             for (Map<String, List<String>> targetContext : targetContexts) {
-                Decision decision = evaluator.evaluate(caller, resourcePolicies, action, resource, targetContext);
+                Decision decision = evaluator.evaluate(caller, resourcePolicies, rcpLevels, action,
+                        resource, withKeys(targetContext, resourceKeys));
                 if (decision != Decision.DENY) {
                     continue;
                 }
@@ -326,18 +347,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 caller = caller.withScpLevels(scpLevels);
             }
 
-            Map<String, List<String>> conditionContext = null;
             RequestPrincipal principal = accountRootPrincipal
                     ? RequestPrincipal.accountRoot(accountId)
                     : iamService.resolveCallerPrincipal(akid).orElse(null);
             caller = caller.withPrincipal(principal);
-            if (principal != null && principal.arn() != null) {
-                conditionContext = new HashMap<>();
-                conditionContext.put("aws:PrincipalArn", List.of(principal.arn()));
-            }
 
             ResourcePolicies resourcePolicies = resourcePolicyLookup.policiesFor(resource);
-            Decision decision = evaluator.evaluate(caller, resourcePolicies, action, resource, conditionContext);
+            String resourceAccountId = resourceAccountOf(resourcePolicies, resource);
+            Map<String, List<String>> conditionContext = withKeys(
+                    principalConditionKeys(principal, accountId),
+                    resourceConditionKeys(resourceAccountId));
+            List<List<String>> rcpLevels =
+                    resourceControlPolicyLevels(serviceOf(action), resourceAccountId, principal);
+            Decision decision = evaluator.evaluate(caller, resourcePolicies, rcpLevels, action,
+                    resource, conditionContext);
             if (decision != Decision.DENY) {
                 return;
             }
@@ -351,6 +374,113 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         } finally {
             requestContext.setAccountId(previousAccountId);
         }
+    }
+
+    /**
+     * The condition keys that describe the caller: its ARN, its account, and, when that account
+     * belongs to an organization, that organization's id and the account's organization path. An
+     * account in no organization carries none of the organization keys, exactly as on AWS.
+     */
+    private Map<String, List<String>> principalConditionKeys(RequestPrincipal principal, String accountId) {
+        Map<String, List<String>> keys = new HashMap<>();
+        if (principal != null && principal.arn() != null) {
+            keys.put("aws:PrincipalArn", List.of(principal.arn()));
+        }
+        String principalAccount = principal != null && principal.accountId() != null
+                ? principal.accountId() : accountId;
+        if (principalAccount != null) {
+            keys.put("aws:PrincipalAccount", List.of(principalAccount));
+            organizationOf(principalAccount).ifPresent(organization -> {
+                keys.put("aws:PrincipalOrgID", List.of(organization.organizationId()));
+                keys.put("aws:PrincipalOrgPaths", List.of(organization.path()));
+            });
+        }
+        return keys;
+    }
+
+    /** The same three facts about the account that owns the resource the request names. */
+    private Map<String, List<String>> resourceConditionKeys(String resourceAccountId) {
+        if (resourceAccountId == null) {
+            return Map.of();
+        }
+        Map<String, List<String>> keys = new HashMap<>();
+        keys.put("aws:ResourceAccount", List.of(resourceAccountId));
+        organizationOf(resourceAccountId).ifPresent(organization -> {
+            keys.put("aws:ResourceOrgID", List.of(organization.organizationId()));
+            keys.put("aws:ResourceOrgPaths", List.of(organization.path()));
+        });
+        return keys;
+    }
+
+    /**
+     * The account that owns the resource: the owner the resource policy lookup already finds,
+     * which is the only source for an S3 ARN because an S3 ARN carries no account, falling back to
+     * the account the ARN itself names. Null when neither says, which leaves the resource keys
+     * absent rather than claiming an account nothing established.
+     */
+    private String resourceAccountOf(ResourcePolicies resourcePolicies, String resource) {
+        if (resourcePolicies != null && resourcePolicies.ownerAccountId() != null) {
+            return resourcePolicies.ownerAccountId();
+        }
+        if (resource == null || !AwsArnUtils.isArn(resource)) {
+            return null;
+        }
+        String account = AwsArnUtils.accountOrDefault(resource, null);
+        return account == null || account.isBlank() ? null : account;
+    }
+
+    /**
+     * The resource control policies bounding the account that owns the resource, or null when
+     * none apply: the service is not one AWS supports resource control policies for, the owner is
+     * unknown, or the caller is a service-linked role, which AWS exempts.
+     */
+    private List<List<String>> resourceControlPolicyLevels(String credentialScope,
+                                                           String resourceAccountId,
+                                                           RequestPrincipal principal) {
+        if (resourceAccountId == null
+                || !RESOURCE_CONTROL_POLICY_SCOPES.contains(credentialScope)
+                || isServiceLinkedRole(principal)
+                || !organizationProvider.isResolvable()) {
+            return null;
+        }
+        return organizationProvider.get().effectiveRcpLevels(resourceAccountId);
+    }
+
+    /** The credential scope an action names, {@code s3} for {@code s3:GetObject}. */
+    private static String serviceOf(String action) {
+        if (action == null) {
+            return null;
+        }
+        int colon = action.indexOf(':');
+        return colon <= 0 ? null : action.substring(0, colon);
+    }
+
+    private static boolean isServiceLinkedRole(RequestPrincipal principal) {
+        if (principal == null) {
+            return false;
+        }
+        return (principal.roleArn() != null && principal.roleArn().contains(SERVICE_LINKED_ROLE_PATH))
+                || (principal.arn() != null && principal.arn().contains(SERVICE_LINKED_ROLE_PATH));
+    }
+
+    private Optional<AccountOrganization> organizationOf(String accountId) {
+        return organizationProvider.isResolvable()
+                ? organizationProvider.get().organizationOf(accountId)
+                : Optional.empty();
+    }
+
+    /**
+     * A copy of {@code context} with {@code keys} added. The contexts a resolver returns are read
+     * once per resource, so each resource's keys go onto a copy rather than onto the shared map.
+     */
+    private static Map<String, List<String>> withKeys(Map<String, List<String>> context,
+                                                      Map<String, List<String>> keys) {
+        if (keys.isEmpty()) {
+            return context;
+        }
+        Map<String, List<String>> merged = context == null ? new HashMap<>() : new HashMap<>(context);
+        merged.putAll(keys);
+        return merged;
     }
 
     /**
