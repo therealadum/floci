@@ -356,39 +356,60 @@ floci:
 
 SCP semantics match AWS: SCPs never grant permissions — they cap what identity policies
 may allow; the organization's **management account is exempt**; and an account outside
-any organization is unaffected. The `test` credential and unknown access keys are never
-SCP-denied.
+any organization is unaffected. Under enforcement the `test` credential and unknown access
+keys never reach SCP evaluation at all — they are refused first.
 
 **The account-root principal is subject to SCPs.** floci's account root is a bare
 12-digit account-id access key (the LocalStack multi-account convention). It carries no
-registered IAM identity, so it normally takes the unknown-key bypass. But when the access
-key equals its own account ID **and** that account has an effective SCP ceiling
-(`effectiveScpLevels != null` — i.e. it is a non-management member under a root with the
-SCP policy type enabled and at least one attached SCP), floci synthesizes an
-allow-everything root identity and evaluates the request against the SCP chain. In that
-case **SCPs apply and nothing else does** — no identity policies, permission boundary, or
-session policy attaches to the bare account key. If the account has no effective SCP
-ceiling (the management account, an account outside any organization, or the SCP type
-disabled), the bare key still bypasses enforcement entirely, and unknown `AKIA…` keys
-always bypass unconditionally.
+registered IAM identity, so floci synthesizes an allow-everything root identity for it and
+evaluates the request against the SCP chain when the account has one. **SCPs apply to it
+and nothing else does** — no identity policies, permission boundary, or session policy
+attaches to the bare account key. Identity-policy enforcement of a member account still
+requires an assumable, account-routable identity such as the `OrganizationAccountAccessRole`
+session.
 
-### Bypass rules
+### What enforcement allows
 
-These identities always bypass enforcement (backward-compatible defaults):
+With enforcement on, nothing is allowed by default. A request is let through only when:
 
-| Identity | Behaviour |
+| Request | Behaviour |
 |---|---|
-| Access key `test` (the default dev credential) | Always allowed — no policy lookup |
-| Unknown access key (not in IAM store) | Always allowed — backward-compatible with pre-existing keys |
-| No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
-| Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
+| No AWS SigV4 credential on the request | Allowed here — there is no principal to evaluate, so the route decides (an anonymous S3 read, a Bearer-token UI call, `/health`) |
+| `sts:GetCallerIdentity` | Allowed — AWS answers it without permissions |
+| The caller's policies allow the action on every resource named | Allowed |
+| The account-root principal (bare 12-digit key) | Allowed, capped by SCPs |
 
-**Exception:** a bare 12-digit account-id key that equals its own account and sits under
-an effective SCP ceiling is **not** treated as an unknown key — it is evaluated against
-the SCP chain as the account root (see [Service control policies](#service-control-policies-scps)
-above). Identity-policy enforcement of a member account still requires an assumable,
-account-routable identity such as the `OrganizationAccountAccessRole` session; the bare
-account key carries no identity policies of its own.
+Everything else is refused with `AccessDenied`, including four cases that earlier releases
+allowed:
+
+| Request | Behaviour under enforcement |
+|---|---|
+| Access key `test` | **Refused.** The dev credential is a root stand-in only while enforcement is off |
+| An access key the account never issued | **Refused** |
+| An expired session, or a session carrying no role | **Refused** |
+| An action the action registry cannot name | **Refused** — an action nobody can name is an action no policy can allow |
+
+With enforcement off, every one of these behaves exactly as it always has.
+
+### The one default credential under enforcement
+
+Under enforcement the emulator's one default credential is the **seeded deployer
+principal**: the `floci-deployer` user with access key `floci`, secret `floci`, and
+`AdministratorAccess`, created at start by
+`FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true` (see
+[Optional Local Deployer Principal](#optional-local-deployer-principal)). It is a real IAM
+user with a real secret, so it also survives
+[request signature validation](#request-signature-validation). Point a client at it the
+way you would at any AWS credential:
+
+```bash
+AWS_ACCESS_KEY_ID=floci AWS_SECRET_ACCESS_KEY=floci aws --endpoint-url http://localhost:4566 s3 ls
+```
+
+It is seeded in the default account. It reaches every other account the way an
+administrator in a management account does — by calling `sts:AssumeRole` on a role in the
+target account whose trust policy names the management account, such as the role
+`CreateAccount` installs. There is no bypass that carries it across an account boundary.
 
 ### Supported policy features
 
@@ -500,6 +521,53 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
   aws s3 ls
 ```
 
+## Request Signature Validation
+
+`floci.auth.validate-signatures` (env `FLOCI_AUTH_VALIDATE_SIGNATURES`) makes floci verify
+the SigV4 signature on **every** signed request before anything downstream reads the access
+key off it — for long-term access keys and STS sessions alike.
+
+With it off (the default) an access key is a claim and nothing more: IAM enforcement, S3
+authorization and the presigned paths all read the key out of `Authorization` or
+`X-Amz-Credential` and take the caller's word for it, so any client can act as any
+principal by naming it. Turning it on is what makes the principal above it mean something.
+
+```yaml
+floci:
+  auth:
+    validate-signatures: true
+```
+
+What is checked, and the error AWS gives when it fails:
+
+| Case | S3 | AWS Query | JSON |
+|---|---|---|---|
+| A part of the signature is missing or the credential is malformed | `AccessDenied` (400) | `IncompleteSignature` (400) | `IncompleteSignature` (400) |
+| The access key is not one this account issued, or is inactive | `InvalidAccessKeyId` | `InvalidClientTokenId` | `InvalidClientTokenId` |
+| A session has expired | `ExpiredToken` | `ExpiredToken` | `ExpiredTokenException` |
+| The signing time is outside the five-minute window, or a presigned URL has expired | `AccessDenied` | `SignatureDoesNotMatch` | `InvalidSignatureException` |
+| The signature does not match | `SignatureDoesNotMatch` | `SignatureDoesNotMatch` | `InvalidSignatureException` |
+
+The credential scope is checked too: its date must agree with `X-Amz-Date`, and its region
+and service are the ones the signing key is derived from, so a signature minted for one
+region or service does not verify for another. A temporary (`ASIA…`) credential must present
+the session token floci issued with it.
+
+`UNSIGNED-PAYLOAD` and the `STREAMING-*` payload hashes are honoured as AWS honours them:
+they mean the caller chose not to sign the body, and they count only when
+`x-amz-content-sha256` is itself in `SignedHeaders`. A presigned request is unsigned-payload
+by convention. Otherwise the body is hashed and compared, so a swapped body is a signature
+mismatch rather than a request that keeps its old signature.
+
+### What is exempt
+
+| Exempt | Why |
+|---|---|
+| A request carrying no AWS SigV4 credential | There is no signature to validate. Anonymous S3 reads, public CloudFront objects and the sign-in UI arrive this way and are unchanged |
+| `/health`, `/q/`, `/_floci/`, `/_aws/`, `/_api/`, `/_cloudfront/`, `/_emrserverless/`, `/cfn-response` | floci's own inspection, UI and internal endpoints. No SDK signs them |
+| Requests scoped to `execute-api` | The [API Gateway](api-gateway.md) data plane verifies the same signature itself, against the path the client signed before route rewriting |
+| Content served for a CloudFront distribution or a Cognito custom domain | An `Authorization` header there belongs to the origin or the application, and is forwarded rather than verified |
+
 ## Service Control Policies (SCPs)
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` and
@@ -537,16 +605,17 @@ lazily-resolved `ScpProvider` exists to avoid.
 
 ## Bypass rules
 
-Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
-the emulator cannot reason about:
+With enforcement on, nothing is allowed by default. Two cases pass through, and one principal is
+allowed by what it is:
 
 | Case | Behaviour |
 | --- | --- |
-| Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| No AWS SigV4 credential on the request | Passed through. There is no principal to evaluate, so the route decides. |
 | `sts:GetCallerIdentity` | Always allowed — AWS returns caller identity even when a policy denies it. |
-| Unknown access key | Allowed. A key that resolves to no IAM identity bypasses enforcement. |
-| Bare account-id key with no SCP ceiling | Allowed. With no organization or SCP enforcement off, the account root keeps the historical bypass. |
-| Bare account-id key **with** an SCP ceiling | Enforced as the account root, bounded by the SCP chain. |
+| Bare account-id key | Enforced as the account root: full access, bounded by the SCP chain when the account has one. |
+
+An unresolvable action, an unknown access key, an expired session, a session with no role, and the
+`test` credential are all **refused** — see [What enforcement allows](#what-enforcement-allows).
 
 ## Service-linked roles
 
@@ -583,6 +652,7 @@ Three deviations to be aware of:
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
 | `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
 | `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` | _(unset)_ | Seed an account alias at startup; unset means the account has no alias |
+| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify the SigV4 signature on every signed request, so the access key on it is proven rather than claimed |
 
 ## Examples
 

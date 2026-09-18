@@ -88,7 +88,7 @@ floci:
     #   - localhost.localstack.cloud
 
   auth:
-    validate-signatures: false               # Set to true to verify S3 presigned URL signatures
+    validate-signatures: false               # Set to true to verify the SigV4 signature on every signed request
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
 
   tls:
@@ -157,8 +157,8 @@ floci:
 
     iam:
       enabled: true
-      enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
-      seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
+      enforcement-enabled: false        # Set to true to enforce IAM policies on all requests; nothing is allowed by default
+      seed-deployer-principal: false    # Set to true to create the floci-deployer admin principal (access key `floci`, secret `floci`)
 
     networkfirewall:
       enabled: true

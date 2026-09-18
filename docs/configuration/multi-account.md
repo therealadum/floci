@@ -176,7 +176,9 @@ FLOCI_AUTH_VALIDATE_SIGNATURES=true
 FLOCI_AUTH_PRESIGN_SECRET=your-secret   # for pre-signed URL verification
 ```
 
-When `validate-signatures` is `false` (the default), S3 presigned URL signatures are not verified. Account routing remains AKID-based regardless of this setting.
+When `validate-signatures` is `false` (the default), no request signature is verified — neither a header-signed
+request nor an S3 presigned URL — so the access key on a request is a claim and nothing more. Account routing
+remains AKID-based regardless of this setting.
 
 ## Persistence and Account Isolation
 

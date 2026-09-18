@@ -3259,12 +3259,9 @@ public class S3Controller {
          * running S3 without its own presigned-POST enforcement. authorizeAdditionalResource
          * itself no-ops when IAM enforcement is disabled.
          */
-        String credential = lcFields.get("x-amz-credential");
-        if (credential != null && !credential.isEmpty()) {
-            iamEnforcementFilter.authorizeAdditionalResource(
-                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
-        }
-
+        // Authentication comes first, as it does on AWS and as SignatureValidationFilter arranges
+        // for every other request shape: a credential whose signature does not verify is answered
+        // with the signature error, not with the access denial of a principal it never proved.
         if (s3Service.isAuthEnforced()) {
             validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
         } else {
@@ -3273,6 +3270,12 @@ public class S3Controller {
             if (policy != null && !policy.isEmpty()) {
                 validatePolicyConditions(policy, bucket, lcFields, fileData.length);
             }
+        }
+
+        String credential = lcFields.get("x-amz-credential");
+        if (credential != null && !credential.isEmpty()) {
+            iamEnforcementFilter.authorizeAdditionalResource(
+                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
         }
 
         // Use Content-Type from form fields, fall back to file part Content-Type

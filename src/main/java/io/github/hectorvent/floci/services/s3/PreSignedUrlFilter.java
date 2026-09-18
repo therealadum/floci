@@ -223,7 +223,10 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
     private String resolveSecretKey(String accessKeyId, String sessionToken) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
-            return LEGACY_SECRET_KEY;
+            // Honoured only while IAM enforcement is off, symmetrically with S3Service and
+            // S3PostPolicySigner. Under enforcement the default credential is the seeded deployer
+            // principal, which carries a real secret and so verifies like any other key.
+            return iamService == null || !iamService.isEnforcementEnabled() ? LEGACY_SECRET_KEY : null;
         }
         if (iamService != null) {
             Optional<String> registered = iamService.findSecretKey(accessKeyId, sessionToken);

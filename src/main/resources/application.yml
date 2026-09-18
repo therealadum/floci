@@ -214,6 +214,11 @@ floci:
       - 8.8.4.4
 
   auth:
+    # Validate the SigV4 signature on every signed request, for access keys and
+    # sessions alike, before anything downstream reads the access key off it. With this off
+    # (the default) an access key is only a claim: any client can act as any principal by
+    # naming it. Also governs S3 presigned URL signature verification, which was this key's
+    # only meaning before. Env var: FLOCI_AUTH_VALIDATE_SIGNATURES
     validate-signatures: false
     presign-secret: local-emulator-secret
 

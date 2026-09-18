@@ -23,6 +23,8 @@ import static org.hamcrest.Matchers.containsString;
 class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static final String REGION = "us-east-1";
+    /** Under enforcement the emulator's one default credential is the seeded deployer. */
+    private static final String DEPLOYER_ACCESS_KEY_ID = "floci";
 
     @Test
     void copyObjectIsDeniedWhenCallerCannotReadTheSource() {
@@ -111,7 +113,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void createBucketAsRoot(String bucket) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "s3"))
         .when()
                 .put("/" + bucket)
         .then()
@@ -120,7 +122,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void putObjectAsRoot(String bucket, String key, String body) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "s3"))
                 .contentType("text/plain")
                 .body(body)
         .when()
@@ -131,7 +133,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static String initiateMultipartUploadAsRoot(String bucket, String key) {
         return given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "s3"))
                 .queryParam("uploads", "")
         .when()
                 .post("/" + bucket + "/" + key)
@@ -147,7 +149,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         given()
                 .formParam("Action", "CreateUser")
                 .formParam("UserName", userName)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -156,7 +158,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         return given()
                 .formParam("Action", "CreateAccessKey")
                 .formParam("UserName", userName)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -171,7 +173,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 .formParam("UserName", userName)
                 .formParam("PolicyName", policyName)
                 .formParam("PolicyDocument", policyDocument)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -186,7 +188,8 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     public static final class IamEnforcementProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
+            return Map.of("floci.services.iam.enforcement-enabled", "true",
+                    "floci.services.iam.seed-deployer-principal", "true");
         }
     }
 }

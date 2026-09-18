@@ -35,13 +35,19 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
         public Map<String, String> getConfigOverrides() {
             return Map.of(
                     "floci.services.s3.enforce-auth", "true",
-                    "floci.services.iam.enforcement-enabled", "true");
+                    "floci.services.iam.enforcement-enabled", "true",
+                    "floci.services.iam.seed-deployer-principal", "true");
         }
     }
 
     private static final String BUCKET = "presigned-post-auth-bucket";
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
+    /**
+     * Under enforcement the emulator's one default credential is the seeded deployer principal,
+     * a registered IAM user with a real secret. The well-known {@code test} pair is a root
+     * stand-in only while enforcement is off, so it cannot stand in here.
+     */
+    private static final String DEPLOYER_ACCESS_KEY_ID = "floci";
+    private static final String DEPLOYER_SECRET_KEY = "floci";
     // Matches the "20260101" date embedded in every credential scope built by this test class.
     private static final String AMZ_DATE = "20260101T000000Z";
 
@@ -49,7 +55,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     @Order(1)
     void createBucket() {
         given()
-        .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID))
+        .header("Authorization", authorizationHeader(DEPLOYER_ACCESS_KEY_ID))
         .when()
             .put("/" + BUCKET)
         .then()
@@ -82,7 +88,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .multiPart("key", key)
             .multiPart("policy", policyBase64)
             .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
-            .multiPart("x-amz-credential", LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request")
+            .multiPart("x-amz-credential", DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request")
             .multiPart("x-amz-date", AMZ_DATE)
             .multiPart("x-amz-signature",
                     "0000000000000000000000000000000000000000000000000000000000dead")
@@ -95,7 +101,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .body("Error.Code", org.hamcrest.Matchers.equalTo("SignatureDoesNotMatch"));
 
         given()
-            .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID))
+            .header("Authorization", authorizationHeader(DEPLOYER_ACCESS_KEY_ID))
         .when()
             .get("/" + BUCKET + "/" + key)
         .then()
@@ -131,8 +137,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     void rejectsUploadMissingRequiredFormFields() {
         String key = "missing-date.txt";
         String policyBase64 = buildPolicyBase64(BUCKET, key);
-        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
-        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+        String credential = DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, DEPLOYER_SECRET_KEY);
 
         // Missing x-amz-date entirely, even though the policy and signature are otherwise genuine.
         given()
@@ -156,8 +162,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
         String key = "malformed-scope.txt";
         String policyBase64 = buildPolicyBase64(BUCKET, key);
         // Wrong service ("ec2" instead of "s3") in an otherwise well-formed credential scope.
-        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/ec2/aws4_request";
-        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+        String credential = DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/ec2/aws4_request";
+        String signature = signPolicy(policyBase64, credential, DEPLOYER_SECRET_KEY);
 
         given()
             .multiPart("key", key)
@@ -180,8 +186,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     void rejectsUploadWhereFormDateDisagreesWithCredentialScope() {
         String key = "date-mismatch.txt";
         String policyBase64 = buildPolicyBase64(BUCKET, key);
-        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
-        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+        String credential = DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, DEPLOYER_SECRET_KEY);
 
         // x-amz-date's date (20260102) disagrees with the credential scope's date (20260101).
         given()
@@ -208,8 +214,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
         // "20261332" has the right digit shape but month 13 / day 32 don't exist; same for the
         // 99:99:99 time. The credential scope's date is made to match digit-for-digit so only
         // strict calendar parsing (not a same-date-string comparison) can catch this.
-        String credential = LEGACY_ACCESS_KEY_ID + "/20261332/us-east-1/s3/aws4_request";
-        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+        String credential = DEPLOYER_ACCESS_KEY_ID + "/20261332/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, DEPLOYER_SECRET_KEY);
 
         given()
             .multiPart("key", key)
@@ -233,8 +239,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
         String key = "uploads/genuine.txt";
         String fileContent = "uploaded with a real signature";
         String policyBase64 = buildPolicyBase64(BUCKET, key);
-        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
-        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+        String credential = DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, DEPLOYER_SECRET_KEY);
 
         given()
             .multiPart("key", key)
@@ -251,7 +257,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .header("ETag", notNullValue());
 
         given()
-            .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID))
+            .header("Authorization", authorizationHeader(DEPLOYER_ACCESS_KEY_ID))
         .when()
             .get("/" + BUCKET + "/" + key)
         .then()
@@ -276,8 +282,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
                 }
                 """.formatted(expiration, BUCKET, key);
         String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
-        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
-        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+        String credential = DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, DEPLOYER_SECRET_KEY);
 
         given()
             .multiPart("key", key)
@@ -308,8 +314,8 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
                 }
                 """.formatted(BUCKET, key);
         String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
-        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
-        String signature = signPolicy(policyBase64, credential, LEGACY_SECRET_KEY);
+        String credential = DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, DEPLOYER_SECRET_KEY);
 
         given()
             .multiPart("key", key)
@@ -399,7 +405,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     }
 
     private static final String IAM_ROOT_AUTH =
-            "AWS4-HMAC-SHA256 Credential=" + LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/iam/aws4_request"
+            "AWS4-HMAC-SHA256 Credential=" + DEPLOYER_ACCESS_KEY_ID + "/20260101/us-east-1/iam/aws4_request"
                     + ", SignedHeaders=host, Signature=abc";
 
     /** Returns {accessKeyId, secretAccessKey} for a freshly created IAM user. */
@@ -435,7 +441,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .formParam("UserName", userName)
             .formParam("PolicyName", policyName)
             .formParam("PolicyDocument", policyDocument)
-            .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID).replace("/s3/", "/iam/"))
+            .header("Authorization", authorizationHeader(DEPLOYER_ACCESS_KEY_ID).replace("/s3/", "/iam/"))
         .when()
             .post("/")
         .then()

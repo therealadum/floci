@@ -31,6 +31,8 @@ import static org.hamcrest.Matchers.equalTo;
 class S3PresignedPostIamOnlyEnforcementIntegrationTest {
 
     private static final String REGION = "us-east-1";
+    /** Under enforcement the emulator's one default credential is the seeded deployer. */
+    private static final String DEPLOYER_ACCESS_KEY_ID = "floci";
     /** A non-default account, distinct from the configured {@code 000000000000} default. */
     private static final String NON_DEFAULT_ACCOUNT = "222233334444";
     private static final DateTimeFormatter AMZ_DATE_FMT =
@@ -151,7 +153,7 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
 
     private static void createBucketAsRoot(String bucket) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "s3"))
         .when()
                 .put("/" + bucket)
         .then()
@@ -164,7 +166,7 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
 
     /** Creates the user (and its access key) as root in {@code accountId}, or the default account when null. */
     private static String createUser(String userName, String accountId) {
-        String authHeader = auth(accountId == null ? "test" : accountId, "iam");
+        String authHeader = auth(accountId == null ? DEPLOYER_ACCESS_KEY_ID : accountId, "iam");
         given()
                 .formParam("Action", "CreateUser")
                 .formParam("UserName", userName)
@@ -197,7 +199,7 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
                 .formParam("UserName", userName)
                 .formParam("PolicyName", policyName)
                 .formParam("PolicyDocument", policyDocument)
-                .header("Authorization", auth(accountId == null ? "test" : accountId, "iam"))
+                .header("Authorization", auth(accountId == null ? DEPLOYER_ACCESS_KEY_ID : accountId, "iam"))
         .when()
                 .post("/")
         .then()
@@ -215,7 +217,8 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         public Map<String, String> getConfigOverrides() {
             return Map.of(
                     "floci.services.iam.enforcement-enabled", "true",
-                    "floci.services.s3.enforce-auth", "false");
+                    "floci.services.s3.enforce-auth", "false",
+                    "floci.services.iam.seed-deployer-principal", "true");
         }
     }
 }

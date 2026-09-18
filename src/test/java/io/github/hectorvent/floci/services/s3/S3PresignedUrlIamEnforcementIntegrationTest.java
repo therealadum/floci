@@ -34,6 +34,8 @@ import static org.hamcrest.Matchers.containsString;
 class S3PresignedUrlIamEnforcementIntegrationTest {
 
     private static final String REGION = "us-east-1";
+    /** Under enforcement the emulator's one default credential is the seeded deployer. */
+    private static final String DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final DateTimeFormatter AMZ_DATE_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
@@ -122,7 +124,7 @@ class S3PresignedUrlIamEnforcementIntegrationTest {
 
     private static void createBucketAsRoot(String bucket) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "s3"))
         .when()
                 .put("/" + bucket)
         .then()
@@ -133,7 +135,7 @@ class S3PresignedUrlIamEnforcementIntegrationTest {
         given()
                 .formParam("Action", "CreateUser")
                 .formParam("UserName", userName)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -142,7 +144,7 @@ class S3PresignedUrlIamEnforcementIntegrationTest {
         return given()
                 .formParam("Action", "CreateAccessKey")
                 .formParam("UserName", userName)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -157,7 +159,7 @@ class S3PresignedUrlIamEnforcementIntegrationTest {
                 .formParam("UserName", userName)
                 .formParam("PolicyName", policyName)
                 .formParam("PolicyDocument", policyDocument)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(DEPLOYER_ACCESS_KEY_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -172,7 +174,8 @@ class S3PresignedUrlIamEnforcementIntegrationTest {
     public static final class IamEnforcementProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
+            return Map.of("floci.services.iam.enforcement-enabled", "true",
+                    "floci.services.iam.seed-deployer-principal", "true");
         }
     }
 }

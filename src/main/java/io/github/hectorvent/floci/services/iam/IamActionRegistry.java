@@ -41,6 +41,11 @@ public class IamActionRegistry {
         rule("s3", "PUT",    "^/[^/]+/.+",                       "s3:PutObject"),
         rule("s3", "DELETE", "^/[^/]+/.+",                       "s3:DeleteObject"),
         rule("s3", "HEAD",   "^/[^/]+/.+",                       "s3:GetObject"),
+        // POST on an object is a multipart upload's start or finish, and POST on a bucket is a
+        // browser form upload; both write the object. DeleteObjects, which is also a POST on a
+        // bucket, is separated out by its ?delete sub-resource above.
+        rule("s3", "POST",   "^/[^/]+/.+",                       "s3:PutObject"),
+        rule("s3", "POST",   "^/[^/]+/?$",                       "s3:PutObject"),
 
         // ── Lambda ──────────────────────────────────────────────────────────────
         rule("lambda", "GET",    ".*/functions$",                          "lambda:ListFunctions"),
@@ -189,6 +194,12 @@ public class IamActionRegistry {
         boolean tagging = params.containsKey("tagging");
         boolean accelerate = params.containsKey("accelerate");
         boolean replication = params.containsKey("replication");
+        // DeleteObjects is a POST on a bucket, the same shape as a browser form upload, and only
+        // ?delete tells them apart. Without this it would map to s3:PutObject and a policy that
+        // grants writes would carry deletes with it.
+        if ("POST".equals(method) && params.containsKey("delete")) {
+            return "s3:DeleteObject";
+        }
         if (!acl && !tagging && !accelerate && !replication) {
             return null;
         }

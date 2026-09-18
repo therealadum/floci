@@ -138,6 +138,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
+    /**
+     * Whether {@code floci.services.iam.enforcement-enabled} is on, for the callers that have to
+     * refuse the legacy {@code test} credential under enforcement — S3's own authorization, the
+     * presigned URL filter, the presigned POST signer, and the execute-api authorizer. Written once
+     * by the CDI constructor and false for every test-built instance, which is the historical
+     * behaviour those tests rely on.
+     */
+    private boolean enforcementEnabled;
 
     /**
      * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
@@ -165,6 +173,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
         );
+        this.enforcementEnabled = config.services().iam().enforcementEnabled();
+    }
+
+    /**
+     * Whether IAM enforcement is on. Under enforcement the well-known {@code test} credential stops
+     * being a root stand-in: the emulator's one default credential is then the seeded deployer
+     * principal, which is a real IAM user with a real secret and so survives signature validation.
+     */
+    public boolean isEnforcementEnabled() {
+        return enforcementEnabled;
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -1917,6 +1935,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return currentSession(accessKeyId)
                 .map(SessionCredential::getSessionToken)
                 .filter(token -> !token.isBlank());
+    }
+
+    /**
+     * Whether {@code accessKeyId} names a session Floci minted whose expiration has passed.
+     *
+     * <p>Signature validation needs this to tell AWS's two refusals apart: a credential that never
+     * existed is {@code InvalidClientTokenId}, and one that has simply lapsed is
+     * {@code ExpiredToken}, which tells the client to refresh rather than to check its key.
+     */
+    public boolean hasExpiredSession(String accessKeyId) {
+        return findSessionAnyAccount(accessKeyId)
+                .map(SessionCredential::getExpiration)
+                .filter(expiration -> expiration.isBefore(Instant.now()))
+                .isPresent();
     }
 
     /** Whether an access key ID identifies Floci's documented public deployer credential. */

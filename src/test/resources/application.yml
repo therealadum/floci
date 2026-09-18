@@ -84,6 +84,8 @@ floci:
         flush-interval-ms: 60000
 
   auth:
+    # Off for the suite, as in production defaults: a test that wants request
+    # signature validation turns it on in its own profile.
     validate-signatures: false
     presign-secret: test-secret
 

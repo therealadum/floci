@@ -965,7 +965,10 @@ public class S3Service implements Resettable, ResourceProvider {
             return false;
         }
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
-            return true;
+            // A local-dev convenience only while IAM enforcement is off. Under enforcement the one
+            // default credential is the seeded deployer principal, which is a registered key with a
+            // real secret; honouring "test" there would leave a credential nobody has to prove.
+            return iamService == null || !iamService.isEnforcementEnabled();
         }
         return iamService != null
                 && iamService.findSecretKey(accessKeyId, authorization.sessionToken()).isPresent();

@@ -31,16 +31,24 @@ import java.util.regex.Pattern;
 
 /**
  * JAX-RS filter that enforces IAM policies on every incoming request when
- * {@code floci.iam.enforcement-enabled = true}.
+ * {@code floci.services.iam.enforcement-enabled = true}.
  *
- * <p>Bypass rules (request is always allowed through):
+ * <p>With enforcement on, nothing is allowed by default. The request is let through only when:
  * <ul>
- *   <li>Enforcement is disabled (default)</li>
- *   <li>Access key is {@code "test"} (root/admin stand-in)</li>
- *   <li>Access key is not found in the IAM store (backward-compatible with pre-existing credentials)</li>
- *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
+ *   <li>Enforcement is disabled (the default), when nothing here runs at all</li>
+ *   <li>The request carries no AWS SigV4 credential, so there is no principal to evaluate and the
+ *       route decides for itself (an anonymous S3 read, a Bearer-token UI call)</li>
  *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions</li>
+ *   <li>The caller's policies allow the action on every resource the request names</li>
  * </ul>
+ *
+ * <p>What was once allowed and is now refused: an action {@link IamActionRegistry} cannot name, an
+ * access key the account never issued, a session that has expired, a session carrying no role, and
+ * the well-known {@code test} credential, which is a root stand-in only while enforcement is off.
+ * Under enforcement the emulator's one default credential is the seeded deployer principal
+ * ({@code floci.services.iam.seed-deployer-principal}), which is a real IAM user with a real secret.
+ * The account-root principal — a bare 12-digit account-id access key — keeps full access, bounded
+ * by service control policies, as it has on AWS.
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
  * permissions boundary. Resource-based policies (S3 bucket policy, Lambda resource
@@ -127,8 +135,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         String akid = accountResolver.extractAccessKeyId(auth);
-        if (akid == null || "test".equals(akid)) {
-            return; // root bypass
+        if (akid == null) {
+            return; // not an AWS SigV4 credential: a Bearer or Basic scheme decided by its route
         }
 
         String rawScope = extractCredentialScope(auth);
@@ -142,7 +150,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         String action = actionRegistry.resolve(credentialScope, ctx);
         if (action == null) {
-            return; // unknown action → ALLOW (permissive)
+            // An action this emulator cannot name is an action no policy can allow. Enforcement
+            // that allowed it would grant, by omission, exactly the calls nobody wrote a rule for.
+            LOG.infov("IAM enforcement DENY: akid={0} unmapped action for {1} {2} {3}",
+                    akid, credentialScope, ctx.getMethod(), ctx.getUriInfo().getPath());
+            ctx.abortWith(unmappedActionResponse(credentialScope, ctx.getMediaType()));
+            return;
         }
         if ("sts:GetCallerIdentity".equals(action)) {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
@@ -169,14 +182,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         CallerContext caller = iamService.resolveCallerContext(akid);
         if (caller == null) {
             // A bare 12-digit account-id key is floci's account-root principal: not a registered
-            // IAM identity (resolveCallerContext → null), but in AWS the account root is still
-            // bounded by SCPs. Enforce them when the account actually has an SCP ceiling; otherwise
-            // preserve the historical unknown-key bypass.
-            if (scpLevels == null || !akid.equals(accountId)) {
-                return; // unknown access key or no SCP ceiling → bypass (backward-compat)
+            // IAM identity (resolveCallerContext → null), but a real principal all the same, with
+            // full access bounded by SCPs.
+            if (akid.equals(accountId)) {
+                caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
+                accountRootPrincipal = true;
+            } else {
+                // Every other empty context is a caller enforcement cannot evaluate: an access key
+                // this account never issued, a session that has expired, or an identity session
+                // carrying no role. Under enforcement each one is refused, never allowed.
+                LOG.infov("IAM enforcement DENY: akid={0} is not a principal of account {1}",
+                        akid, accountId);
+                ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
+                return;
             }
-            caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
-            accountRootPrincipal = true;
         }
         if (scpLevels != null) {
             caller = caller.withScpLevels(scpLevels);
@@ -259,7 +278,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return;
         }
         String akid = accountResolver.extractAccessKeyId(authorizationHeader);
-        if (akid == null || "test".equals(akid)) {
+        if (akid == null) {
             return;
         }
         if (extractCredentialScope(authorizationHeader) == null) {
@@ -276,11 +295,19 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             boolean accountRootPrincipal = false;
             CallerContext caller = iamService.resolveCallerContext(akid);
             if (caller == null) {
-                if (scpLevels == null || !akid.equals(accountId)) {
-                    return;
+                if (akid.equals(accountId)) {
+                    caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
+                    accountRootPrincipal = true;
+                } else {
+                    // Same refusal as filter(): an unknown key, an expired session, or a session
+                    // with no role is a caller enforcement cannot evaluate, so it is refused.
+                    LOG.infov("IAM enforcement DENY: akid={0} is not a principal of account {1}",
+                            akid, accountId);
+                    throw new AwsException("AccessDenied",
+                            "User: " + akid + " is not authorized to perform: " + action
+                                    + " because the credential is not a principal of account " + accountId,
+                            403);
                 }
-                caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
-                accountRootPrincipal = true;
             }
             if (scpLevels != null) {
                 caller = caller.withScpLevels(scpLevels);
@@ -471,6 +498,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return queryXmlAccessDenied(message);
         }
         return jsonAccessDenied(message);
+    }
+
+    /**
+     * The refusal for a request whose action {@link IamActionRegistry} cannot name. It is an
+     * AccessDenied in the same shape as any other, naming the service the credential was scoped to,
+     * because that is all that is known: without an action there is nothing to write a policy about.
+     */
+    // Package-private for unit testing.
+    static Response unmappedActionResponse(String credentialScope, MediaType requestMediaType) {
+        return accessDeniedResponse(credentialScope + ":*", credentialScope, requestMediaType);
     }
 
     private static boolean isFormEncoded(MediaType mt) {

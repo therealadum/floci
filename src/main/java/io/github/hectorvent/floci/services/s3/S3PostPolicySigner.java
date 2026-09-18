@@ -27,7 +27,12 @@ final class S3PostPolicySigner {
 
     static Optional<String> resolveSecretKey(IamService iamService, String accessKeyId, String sessionToken) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
-            return Optional.of(LEGACY_SECRET_KEY);
+            // Honoured only while IAM enforcement is off, symmetrically with S3Service and
+            // PreSignedUrlFilter. Under enforcement the default credential is the seeded deployer
+            // principal, which carries a real secret and so verifies like any other key.
+            return iamService == null || !iamService.isEnforcementEnabled()
+                    ? Optional.of(LEGACY_SECRET_KEY)
+                    : Optional.empty();
         }
         if (iamService != null) {
             return iamService.findSecretKey(accessKeyId, sessionToken);
