@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
@@ -145,6 +146,22 @@ public class OrganizationsService implements ScpProvider {
     private static final Pattern POLICY_ID_PATTERN = Pattern.compile("p-[0-9a-zA-Z_]{8,128}");
     private static final Pattern EMAIL_PATTERN = Pattern.compile("[^\\s@]+@[^\\s@]+\\.[^\\s@]+");
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
+    private static final Pattern ROLE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
+
+    /**
+     * The role {@code CreateAccount} creates inside every account it creates, so the management
+     * account has a way in before anything runs there. {@code RoleName} on the request renames it;
+     * this is the name AWS uses when the request leaves it out. An invited account gets no such
+     * role: AWS only creates it for accounts the organization itself created.
+     */
+    static final String DEFAULT_ENTRY_ROLE_NAME = "OrganizationAccountAccessRole";
+
+    private static final String ADMINISTRATOR_ACCESS_POLICY_ARN = "arn:aws:iam::aws:policy/AdministratorAccess";
+
+    /** Trusts the management account's root, which is how AWS writes this role's trust policy. */
+    private static final String ENTRY_ROLE_TRUST_POLICY =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Principal\":{\"AWS\":\"arn:aws:iam::%s:root\"},\"Action\":\"sts:AssumeRole\"}]}";
 
     private static final int MAX_ACCOUNT_NAME_LENGTH = 50;
     private static final int MAX_OU_NAME_LENGTH = 128;
@@ -164,10 +181,12 @@ public class OrganizationsService implements ScpProvider {
     private final AccountAwareStorageBackend<Handshake> handshakes;
     private final boolean scpEnforcementEnabled;
     private final String managementAccountEmail;
+    private final IamService iamService;
 
     @Inject
     public OrganizationsService(StorageFactory storageFactory, ObjectMapper objectMapper,
-                                EmulatorConfig config) {
+                                EmulatorConfig config, IamService iamService) {
+        this.iamService = iamService;
         EmulatorConfig.OrganizationsServiceConfig organizationsConfig = config.services().organizations();
         this.scpEnforcementEnabled = organizationsConfig.scpEnforcementEnabled();
         this.managementAccountEmail = organizationsConfig.managementAccountEmail()
@@ -189,17 +208,19 @@ public class OrganizationsService implements ScpProvider {
     }
 
     OrganizationsService(ObjectMapper objectMapper,
+                         IamService iamService,
                          AccountAwareStorageBackend<Organization> organizations,
                          AccountAwareStorageBackend<OrganizationAccount> accounts,
                          AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
                          AccountAwareStorageBackend<OrganizationPolicy> policies,
                          AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
                          AccountAwareStorageBackend<Handshake> handshakes) {
-        this(objectMapper, organizations, accounts, organizationalUnits, policies,
+        this(objectMapper, iamService, organizations, accounts, organizationalUnits, policies,
                 createAccountStatuses, handshakes, true);
     }
 
     OrganizationsService(ObjectMapper objectMapper,
+                         IamService iamService,
                          AccountAwareStorageBackend<Organization> organizations,
                          AccountAwareStorageBackend<OrganizationAccount> accounts,
                          AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
@@ -207,11 +228,12 @@ public class OrganizationsService implements ScpProvider {
                          AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
                          AccountAwareStorageBackend<Handshake> handshakes,
                          boolean scpEnforcementEnabled) {
-        this(objectMapper, organizations, accounts, organizationalUnits, policies,
+        this(objectMapper, iamService, organizations, accounts, organizationalUnits, policies,
                 createAccountStatuses, handshakes, scpEnforcementEnabled, null);
     }
 
     OrganizationsService(ObjectMapper objectMapper,
+                         IamService iamService,
                          AccountAwareStorageBackend<Organization> organizations,
                          AccountAwareStorageBackend<OrganizationAccount> accounts,
                          AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
@@ -221,6 +243,7 @@ public class OrganizationsService implements ScpProvider {
                          boolean scpEnforcementEnabled,
                          String managementAccountEmail) {
         this.objectMapper = objectMapper;
+        this.iamService = iamService;
         this.organizations = organizations;
         this.accounts = accounts;
         this.organizationalUnits = organizationalUnits;
@@ -502,9 +525,15 @@ public class OrganizationsService implements ScpProvider {
 
     public CreateAccountStatus createAccount(String callerAccountId, String email, String accountName,
                                              Map<String, String> tags, boolean govCloud) {
+        return createAccount(callerAccountId, email, accountName, null, tags, govCloud);
+    }
+
+    public CreateAccountStatus createAccount(String callerAccountId, String email, String accountName,
+                                             String roleName, Map<String, String> tags, boolean govCloud) {
         Organization organization = requireManagementAccount(callerAccountId);
         validateEmail(email);
         validateName(accountName, "AccountName", MAX_ACCOUNT_NAME_LENGTH);
+        String entryRoleName = validateRoleName(roleName);
         validateTags(tags);
 
         boolean emailTaken = accountsIn(organization).stream()
@@ -528,6 +557,7 @@ public class OrganizationsService implements ScpProvider {
         OrganizationAccount account = newMemberAccount(organization, newAccountId, email, accountName, "CREATED");
         accounts.putForAccount(organization.getMasterAccountId(), newAccountId, account);
         attachFullAwsAccess(organization, newAccountId);
+        createEntryRole(newAccountId, entryRoleName, organization.getMasterAccountId());
 
         status.setState("SUCCEEDED");
         status.setAccountId(newAccountId);
@@ -539,6 +569,28 @@ public class OrganizationsService implements ScpProvider {
 
         LOG.infov("Created account {0} ({1}) in organization {2}", newAccountId, accountName, organization.getId());
         return status;
+    }
+
+    /**
+     * Puts the entry role inside the account that has just been created: it trusts the management
+     * account and carries {@code AdministratorAccess}, so the management account can reach an
+     * account that holds nothing else yet.
+     */
+    private void createEntryRole(String newAccountId, String roleName, String managementAccountId) {
+        iamService.createRoleForAccount(newAccountId, roleName, "/",
+                ENTRY_ROLE_TRUST_POLICY.formatted(managementAccountId), null, 0, null);
+        iamService.attachRolePolicyForAccount(newAccountId, roleName, ADMINISTRATOR_ACCESS_POLICY_ARN);
+    }
+
+    /** {@code RoleName} is optional; AWS names the role {@code OrganizationAccountAccessRole}. */
+    private static String validateRoleName(String roleName) {
+        if (roleName == null || roleName.isEmpty()) {
+            return DEFAULT_ENTRY_ROLE_NAME;
+        }
+        if (!ROLE_NAME_PATTERN.matcher(roleName).matches()) {
+            throw invalidInput("RoleName must match the pattern [\\w+=,.@-]{1,64}.");
+        }
+        return roleName;
     }
 
     public CreateAccountStatus describeCreateAccountStatus(String callerAccountId, String requestId) {

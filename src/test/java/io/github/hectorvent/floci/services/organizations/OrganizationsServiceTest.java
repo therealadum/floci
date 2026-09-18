@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.organizations;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
@@ -26,6 +27,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * Unit coverage for the parts of {@link OrganizationsService} that are awkward to pin down over
@@ -39,12 +46,15 @@ class OrganizationsServiceTest {
 
     private OrganizationsService service;
     private AccountAwareStorageBackend<Handshake> handshakes;
+    private IamService iamService;
 
     @BeforeEach
     void setUp() {
         handshakes = AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT);
+        iamService = mock(IamService.class);
         service = new OrganizationsService(
                 new ObjectMapper(),
+                iamService,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
@@ -83,6 +93,46 @@ class OrganizationsServiceTest {
                 service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false);
         assertTrue(status.getId().matches("car-[a-z0-9]{8}"), status.getId());
         assertTrue(status.getAccountId().matches("\\d{12}"), status.getAccountId());
+    }
+
+    @Test
+    void createAccountLeavesTheEntryRoleInsideTheNewAccount() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
+                .getAccountId();
+
+        verify(iamService).createRoleForAccount(eq(member), eq("OrganizationAccountAccessRole"), eq("/"),
+                argThat(trustPolicy -> trustPolicy.contains("arn:aws:iam::" + MANAGEMENT_ACCOUNT + ":root")
+                        && trustPolicy.contains("sts:AssumeRole")),
+                isNull(), eq(0), isNull());
+        verify(iamService).attachRolePolicyForAccount(member, "OrganizationAccountAccessRole",
+                "arn:aws:iam::aws:policy/AdministratorAccess");
+    }
+
+    @Test
+    void theEntryRoleTakesTheRoleNameTheRequestNames() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member",
+                        "MycelliumEntry", null, false)
+                .getAccountId();
+
+        verify(iamService).createRoleForAccount(eq(member), eq("MycelliumEntry"), eq("/"),
+                argThat(trustPolicy -> trustPolicy.contains(MANAGEMENT_ACCOUNT)), isNull(), eq(0), isNull());
+        verify(iamService).attachRolePolicyForAccount(member, "MycelliumEntry",
+                "arn:aws:iam::aws:policy/AdministratorAccess");
+    }
+
+    @Test
+    void aRoleNameOutsideTheAwsPatternIsRejectedAndNoAccountIsCreated() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        AwsException rejected = assertThrows(AwsException.class, () -> service.createAccount(
+                MANAGEMENT_ACCOUNT, "member@example.com", "Member", "not a role name", null, false));
+
+        assertEquals("InvalidInputException", rejected.getErrorCode());
+        verifyNoInteractions(iamService);
     }
 
     @Test
@@ -399,6 +449,7 @@ class OrganizationsServiceTest {
     void effectiveScpLevelsAreNullWhenEnforcementDisabled() {
         OrganizationsService disabled = new OrganizationsService(
                 new ObjectMapper(),
+                iamService,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
@@ -423,6 +474,7 @@ class OrganizationsServiceTest {
     void managementAccountEmailOverrideIsUsedForOrganizationAndAccount() {
         OrganizationsService configured = new OrganizationsService(
                 new ObjectMapper(),
+                iamService,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
@@ -444,6 +496,7 @@ class OrganizationsServiceTest {
     void malformedManagementAccountEmailOverrideIsRejected() {
         assertThrows(IllegalArgumentException.class, () -> new OrganizationsService(
                 new ObjectMapper(),
+                iamService,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),

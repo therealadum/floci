@@ -8,7 +8,8 @@ import java.util.List;
  *
  * <p>Implemented by the Organizations service; consumed lazily by
  * {@code IamEnforcementFilter} via {@code Instance<ScpProvider>} so IAM never depends on
- * Organizations directly (Organizations already depends on IAM for role provisioning).</p>
+ * Organizations directly. The dependency runs the other way: Organizations injects
+ * {@link IamService} to create the entry role inside every account it creates.</p>
  */
 public interface ScpProvider {
 

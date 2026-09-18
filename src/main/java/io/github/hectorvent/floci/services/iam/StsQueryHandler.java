@@ -138,24 +138,25 @@ public class StsQueryHandler {
     }
 
     /**
-     * When IAM enforcement is enabled, denies AssumeRole if the target role's trust policy does not
-     * permit the caller. Returns {@code null} to allow — enforcement disabled, the role is unknown
-     * to Floci (permissive, backward-compatible), or the caller is permitted.
+     * When IAM enforcement is enabled, denies AssumeRole unless the target role's trust policy
+     * permits the caller. Returns {@code null} to allow: enforcement disabled, or the caller is
+     * permitted. A role that does not exist is denied, which is what AWS does — it answers the
+     * same AccessDenied as a trust policy refusal rather than disclosing that the role is absent.
+     * Allowing it instead would mint a session with no role behind it, which every later request
+     * then denies anyway.
      */
     private Response enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
         if (!config.services().iam().enforcementEnabled()) {
             return null;
         }
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
-        if (role.isEmpty()) {
-            return null;
-        }
         String auth = headers == null ? null : headers.getHeaderString("Authorization");
         String callerAccount = accountResolver.resolve(auth);
         String callerArn = iamService.resolveCallerArn(
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
                 .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
-        if (trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount)) {
+        if (role.isPresent()
+                && trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount)) {
             return null;
         }
         return AwsQueryResponse.error("AccessDenied",

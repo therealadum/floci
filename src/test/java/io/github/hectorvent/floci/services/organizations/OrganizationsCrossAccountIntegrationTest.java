@@ -10,9 +10,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
@@ -45,6 +47,7 @@ class OrganizationsCrossAccountIntegrationTest {
     private String inviteHandshakeId;
     private String declinedHandshakeId;
     private String canceledHandshakeId;
+    private final List<String> createdAccounts = new ArrayList<>();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -59,9 +62,21 @@ class OrganizationsCrossAccountIntegrationTest {
                 .body(body);
     }
 
+    /** IAM speaks the Query protocol, so its requests are form-encoded rather than JSON 1.1. */
+    private RequestSpecification iam(String accountId, String action) {
+        return given()
+                .header("Authorization", authorization(accountId, "iam"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", action);
+    }
+
     private static String authorization(String accountId) {
+        return authorization(accountId, "organizations");
+    }
+
+    private static String authorization(String accountId, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + accountId
-                + "/20260822/us-east-1/organizations/aws4_request, SignedHeaders=host, Signature=abc";
+                + "/20260822/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 
     @Test
@@ -378,7 +393,88 @@ class OrganizationsCrossAccountIntegrationTest {
 
     @Test
     @Order(19)
+    void createAccountProvisionsTheEntryRoleInsideTheNewAccount() {
+        String newAccount = organizations(MANAGEMENT_ACCOUNT, "CreateAccount",
+                "{\"Email\":\"entry-default@example.com\",\"AccountName\":\"EntryDefault\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateAccountStatus.State", equalTo("SUCCEEDED"))
+            .extract().jsonPath().getString("CreateAccountStatus.AccountId");
+        createdAccounts.add(newAccount);
+
+        iam(newAccount, "GetRole").formParam("RoleName", "OrganizationAccountAccessRole")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.Arn",
+                    equalTo("arn:aws:iam::" + newAccount + ":role/OrganizationAccountAccessRole"))
+            // The trust policy names the management account's root, which is how AWS writes it.
+            .body("GetRoleResponse.GetRoleResult.Role.AssumeRolePolicyDocument",
+                    containsString("arn:aws:iam::" + MANAGEMENT_ACCOUNT + ":root"))
+            .body("GetRoleResponse.GetRoleResult.Role.AssumeRolePolicyDocument",
+                    containsString("sts:AssumeRole"));
+
+        iam(newAccount, "ListAttachedRolePolicies").formParam("RoleName", "OrganizationAccountAccessRole")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListAttachedRolePoliciesResponse.ListAttachedRolePoliciesResult.AttachedPolicies.member.PolicyArn",
+                    equalTo("arn:aws:iam::aws:policy/AdministratorAccess"));
+
+        // The role belongs to the new account alone; the management account has no copy of it.
+        iam(MANAGEMENT_ACCOUNT, "GetRole").formParam("RoleName", "OrganizationAccountAccessRole")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchEntity"));
+    }
+
+    @Test
+    @Order(20)
+    void createAccountHonoursTheRoleNameItIsGiven() {
+        String newAccount = organizations(MANAGEMENT_ACCOUNT, "CreateAccount",
+                "{\"Email\":\"entry-named@example.com\",\"AccountName\":\"EntryNamed\","
+                        + "\"RoleName\":\"MycelliumEntry\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateAccountStatus.State", equalTo("SUCCEEDED"))
+            .extract().jsonPath().getString("CreateAccountStatus.AccountId");
+        createdAccounts.add(newAccount);
+
+        iam(newAccount, "GetRole").formParam("RoleName", "MycelliumEntry")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.RoleName", equalTo("MycelliumEntry"));
+
+        iam(newAccount, "GetRole").formParam("RoleName", "OrganizationAccountAccessRole")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchEntity"));
+    }
+
+    @Test
+    @Order(21)
     void tearDownOrganization() {
+        // DeleteOrganization refuses while members are open, so the accounts the entry-role cases
+        // created are closed first.
+        createdAccounts.forEach(accountId ->
+                organizations(MANAGEMENT_ACCOUNT, "CloseAccount", "{\"AccountId\":\"" + accountId + "\"}")
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200));
+
         organizations(MANAGEMENT_ACCOUNT, "DeleteOrganization", "{}")
         .when()
             .post("/")

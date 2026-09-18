@@ -27,8 +27,8 @@ By default `AssumeRole` succeeds for any caller. When `FLOCI_SERVICES_IAM_ENFORC
 and returns `AccessDenied` if it is not permitted. AWS principal forms are matched — `"*"`, an
 account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs — and an
 explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching
-`sts:AssumeRole`. Roles that Floci has no record of stay permissive, so this only affects roles
-created through IAM with a real trust policy.
+`sts:AssumeRole`. A role Floci has no record of is denied too, with the same `AccessDenied`: AWS
+does not disclose whether a role it refuses exists.
 
 ### Known limitations
 

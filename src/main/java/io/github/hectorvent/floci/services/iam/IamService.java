@@ -584,6 +584,37 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return role;
     }
 
+    /**
+     * Creates a role in an explicit account namespace, for a caller acting on an account other
+     * than the request's own. Organizations uses it for the role {@code CreateAccount} leaves
+     * inside the account it has just created: the request belongs to the management account, the
+     * role belongs to the new one, so both the storage partition and the role ARN have to name
+     * the new account rather than the caller.
+     */
+    public IamRole createRoleForAccount(String accountId, String roleName, String path,
+                                        String assumeRolePolicyDocument, String description,
+                                        int maxSessionDuration, Map<String, String> tags) {
+        requireAccountId(accountId);
+        if (findRole(accountId, roleName).isPresent()) {
+            throw new AwsException("EntityAlreadyExists",
+                    "Role with name " + roleName + " already exists.", 409);
+        }
+        String roleId = "AROA" + randomId(16);
+        String normalizedPath = normalizePath(path);
+        String arn = AwsArnUtils.Arn.of("iam", "", accountId, "role" + normalizedPath + roleName).toString();
+        IamRole role = new IamRole(roleId, roleName, normalizedPath, arn, assumeRolePolicyDocument);
+        role.setDescription(description);
+        if (maxSessionDuration > 0) {
+            role.setMaxSessionDuration(maxSessionDuration);
+        }
+        if (tags != null) {
+            role.getTags().putAll(tags);
+        }
+        putForAccount(roles, accountId, roleName, role);
+        LOG.infov("Created IAM role {0} in account {1}", roleName, accountId);
+        return role;
+    }
+
     public IamRole getRole(String roleName) {
         return roles.get(roleName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
@@ -1181,6 +1212,29 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             roles.put(roleName, role);
             policy.setAttachmentCount(policy.getAttachmentCount() + 1);
             policies.put(policyArn, policy);
+        }
+    }
+
+    /**
+     * Attaches a policy to a role in an explicit account namespace, the write counterpart of
+     * {@link #findRole}. AWS-managed policies are global, so only a customer-managed policy is
+     * written back to the account's own policy partition.
+     */
+    public void attachRolePolicyForAccount(String accountId, String roleName, String policyArn) {
+        requireAccountId(accountId);
+        IamRole role = findRole(accountId, roleName)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The role with name " + roleName + " cannot be found.", 404));
+        requireNotServiceLinked(role, roleName);
+        IamPolicy policy = getPolicy(policyArn);
+        if (role.getAttachedPolicyArns().contains(policyArn)) {
+            return;
+        }
+        role.getAttachedPolicyArns().add(policyArn);
+        putForAccount(roles, accountId, roleName, role);
+        policy.setAttachmentCount(policy.getAttachmentCount() + 1);
+        if (!policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            putForAccount(policies, accountId, policyArn, policy);
         }
     }
 
@@ -2381,6 +2435,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
 
         return docs;
+    }
+
+    private static void requireAccountId(String accountId) {
+        if (accountId == null || accountId.isBlank()) {
+            throw new IllegalArgumentException("Account ID must not be blank");
+        }
+    }
+
+    /**
+     * Writes into a named account's partition. A store that is not account-aware, which is what
+     * the unit-test wiring uses, has one partition and takes the value as it is.
+     */
+    private static <V> void putForAccount(StorageBackend<String, V> backend, String accountId,
+                                          String key, V value) {
+        if (backend instanceof AccountAwareStorageBackend<V> aware) {
+            aware.putForAccount(accountId, key, value);
+        } else {
+            backend.put(key, value);
+        }
     }
 
     private String iamArn(String resourceType, String path, String name) {

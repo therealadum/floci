@@ -50,6 +50,11 @@ call `LeaveOrganization`. An account in no organization gets
 - `CreateAccount` returns a `CreateAccountStatus` you can poll with
   `DescribeCreateAccountStatus`, matching the asynchronous AWS contract. A duplicate email
   produces `State=FAILED` with `FailureReason=EMAIL_ALREADY_EXISTS` rather than an error.
+- `CreateAccount` also creates a role inside the new account, as AWS does: `RoleName` on the
+  request, or `OrganizationAccountAccessRole` when it is left out. The role trusts the management
+  account's root for `sts:AssumeRole` and carries the `AdministratorAccess` managed policy, so the
+  management account has a way into an account that holds nothing else yet. An account that joins
+  by invitation gets no such role, again as on AWS.
 - `DescribeEffectivePolicy` merges every policy of the requested type down the
   root → OU → target chain, with the closest ancestor winning on conflicting keys. As on AWS,
   the access-control types (`SERVICE_CONTROL_POLICY`, `RESOURCE_CONTROL_POLICY`) are rejected.
