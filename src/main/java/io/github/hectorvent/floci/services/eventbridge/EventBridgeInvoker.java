@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.iam.ServicePrincipalAuthorizer;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -36,6 +37,9 @@ public class EventBridgeInvoker {
     private static final Logger LOG = Logger.getLogger(EventBridgeInvoker.class);
 
     // AWS can't route an event from a sender bus on to a third bus; the second hop is dropped.
+    /** The principal EventBridge delivers as, which a target's resource policy must name. */
+    private static final String EVENTS_SERVICE_PRINCIPAL = "events.amazonaws.com";
+
     private static final int MAX_BUS_TO_BUS_DEPTH = 1;
     private static final ThreadLocal<Integer> BUS_TO_BUS_DEPTH = ThreadLocal.withInitial(() -> 0);
 
@@ -49,6 +53,7 @@ public class EventBridgeInvoker {
     private final EcsJsonHandler ecsJsonHandler;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final ServicePrincipalAuthorizer servicePrincipalAuthorizer;
     private final String baseUrl;
 
     @Inject
@@ -62,6 +67,7 @@ public class EventBridgeInvoker {
                               EcsJsonHandler ecsJsonHandler,
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
+                              ServicePrincipalAuthorizer servicePrincipalAuthorizer,
                               EmulatorConfig config) {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
@@ -73,6 +79,7 @@ public class EventBridgeInvoker {
         this.ecsJsonHandler = ecsJsonHandler;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.servicePrincipalAuthorizer = servicePrincipalAuthorizer;
         this.baseUrl = config.baseUrl();
     }
 
@@ -83,7 +90,8 @@ public class EventBridgeInvoker {
                        EmulatorConfig config) {
         this(lambdaService, sqsService, snsService,
                 null /* batch */, null /* firehose */, null /* eventBridge */, null /* ecs */,
-                null /* ecsJsonHandler */, null /* regionResolver */, objectMapper, config);
+                null /* ecsJsonHandler */, null /* regionResolver */, objectMapper,
+                null /* servicePrincipalAuthorizer */, config);
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
@@ -111,6 +119,15 @@ public class EventBridgeInvoker {
                 LOG.debugv("EventBridge delivered to SQS: {0}", arn);
             } else if (arn.contains(":sns:")) {
                 String topicRegion = extractRegionFromArn(arn, region);
+                // EventBridge publishes as its own service principal, so the topic's policy is
+                // the whole of the authority: a topic with no statement for
+                // events.amazonaws.com refuses the delivery, as it does on AWS.
+                if (servicePrincipalAuthorizer != null
+                        && !servicePrincipalAuthorizer.allows(
+                                EVENTS_SERVICE_PRINCIPAL, "sns:Publish", arn)) {
+                    LOG.warnv("EventBridge delivery to SNS refused by the topic policy: {0}", arn);
+                    return;
+                }
                 snsService.publish(arn, null, payload, "EventBridge", topicRegion);
                 LOG.debugv("EventBridge delivered to SNS: {0}", arn);
             } else if (arn.contains(":batch:") && arn.contains(":job-queue/")) {

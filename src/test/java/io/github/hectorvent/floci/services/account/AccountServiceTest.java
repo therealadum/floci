@@ -3,9 +3,11 @@ package io.github.hectorvent.floci.services.account;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.account.model.AccountInformation;
 import io.github.hectorvent.floci.services.account.model.AlternateContact;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -31,9 +34,15 @@ class AccountServiceTest {
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
         AccountAwareStorageBackend<AlternateContact> store = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        AccountAwareStorageBackend<AccountInformation> information =
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         when(storageFactory.create(eq("account"), eq("account-alternate-contacts.json"), any(TypeReference.class)))
                 .thenReturn((AccountAwareStorageBackend) store);
-        service = new AccountService(storageFactory, mock(OrganizationsService.class));
+        when(storageFactory.create(eq("account"), eq("account-information.json"), any(TypeReference.class)))
+                .thenReturn((AccountAwareStorageBackend) information);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().account().standaloneName()).thenReturn("floci");
+        service = new AccountService(storageFactory, mock(OrganizationsService.class), config);
     }
 
     @Test

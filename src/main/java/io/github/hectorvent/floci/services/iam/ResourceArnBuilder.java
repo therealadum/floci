@@ -7,13 +7,19 @@ import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLDecoder;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -25,6 +31,9 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class ResourceArnBuilder {
+
+    /** Where the decoded form body is held for the life of one request. */
+    private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
 
     private final ObjectMapper objectMapper;
 
@@ -422,9 +431,80 @@ public class ResourceArnBuilder {
         return slash > 0 ? after.substring(0, slash) : after;
     }
 
+    /**
+     * One parameter of a Query-protocol request, from the URL when it is there and from the
+     * form-encoded body otherwise.
+     *
+     * <p>An SDK sends a Query-protocol call as a POST with every parameter in the body, which is
+     * also the only shape a SigV4 signature covers, so reading the URL alone found nothing on a
+     * genuinely signed request: every SNS and SQS target then fell back to the wildcard ARN of
+     * the caller's own account, and a topic or queue policy could never be found for it. The body
+     * is buffered and put back, exactly as {@code IamActionRegistry} does when it reads
+     * {@code Action} out of the same body.</p>
+     */
     private String firstFormParam(ContainerRequestContext ctx, String name) {
-        // Form params are typically available as query params in REST-Assured / JAX-RS
-        String v = ctx.getUriInfo().getQueryParameters().getFirst(name);
-        return v;
+        String fromUrl = ctx.getUriInfo().getQueryParameters().getFirst(name);
+        if (fromUrl != null && !fromUrl.isEmpty()) {
+            return fromUrl;
+        }
+        Map<String, String> form = readFormBody(ctx);
+        return form == null ? null : form.get(name);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, String> readFormBody(ContainerRequestContext ctx) {
+        Object cached = ctx.getProperty(BUFFERED_FORM_BODY);
+        if (cached instanceof Map<?, ?> map) {
+            return (Map<String, String>) map;
+        }
+        MediaType mediaType = ctx.getMediaType();
+        if (mediaType == null
+                || !"application".equalsIgnoreCase(mediaType.getType())
+                || !"x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype())) {
+            return null;
+        }
+        InputStream in = ctx.getEntityStream();
+        if (in == null) {
+            return null;
+        }
+        byte[] body;
+        try {
+            body = in.readAllBytes();
+        } catch (IOException e) {
+            ctx.setEntityStream(new ByteArrayInputStream(new byte[0]));
+            return null;
+        }
+        ctx.setEntityStream(new ByteArrayInputStream(body));
+        if (body.length == 0) {
+            return null;
+        }
+        Charset charset = formCharset(mediaType);
+        Map<String, String> parameters = new HashMap<>();
+        for (String pair : new String(body, charset).split("&")) {
+            int equals = pair.indexOf('=');
+            if (equals < 0) {
+                continue;
+            }
+            try {
+                parameters.putIfAbsent(URLDecoder.decode(pair.substring(0, equals), charset),
+                        URLDecoder.decode(pair.substring(equals + 1), charset));
+            } catch (RuntimeException e) {
+                // A parameter this emulator cannot decode names no resource; the rest still do.
+            }
+        }
+        ctx.setProperty(BUFFERED_FORM_BODY, parameters);
+        return parameters;
+    }
+
+    private static Charset formCharset(MediaType mediaType) {
+        String name = mediaType.getParameters().get("charset");
+        if (name == null || name.isBlank()) {
+            return StandardCharsets.UTF_8;
+        }
+        try {
+            return Charset.forName(name);
+        } catch (RuntimeException e) {
+            return StandardCharsets.UTF_8;
+        }
     }
 }

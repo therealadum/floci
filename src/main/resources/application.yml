@@ -677,6 +677,9 @@ floci:
       enabled: true
     account:
       enabled: true
+      # The account name GetAccountInformation answers for an account that belongs to no
+      # organization. An organization member answers with the name CreateAccount gave it.
+      standalone-name: floci
     controlcatalog:
       enabled: true
     accessanalyzer:

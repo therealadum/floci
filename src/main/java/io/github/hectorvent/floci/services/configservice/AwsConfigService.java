@@ -683,6 +683,13 @@ public class AwsConfigService {
             throw new AwsException("NoSuchConfigurationRecorderException",
                     "Cannot find configuration recorder with the specified name.", 400);
         }
+        // AWS refuses to start a recorder that has nowhere to deliver to, which is what makes the
+        // order PutConfigurationRecorder, PutDeliveryChannel, StartConfigurationRecorder the only
+        // one that works.
+        if (!deliveryChannels.containsKey(region)) {
+            throw new AwsException("NoAvailableDeliveryChannelException",
+                    "There is no delivery channel available to record to.", 400);
+        }
         recorderRunning.put(region, true);
         recorderLastStartTime.put(region, now());
     }

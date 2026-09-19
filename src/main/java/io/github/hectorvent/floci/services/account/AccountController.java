@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.services.account.model.AccountInformation;
 import io.github.hectorvent.floci.services.account.model.AlternateContact;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -44,6 +45,23 @@ public class AccountController {
         AlternateContact contact = accountService.getAlternateContact(requestContext.getAccountId(), readTree(body));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("AlternateContact", objectMapper.valueToTree(contact));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/getAccountInformation")
+    public Response getAccountInformation(String body) {
+        AccountInformation information =
+                accountService.getAccountInformation(requestContext.getAccountId(), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("AccountId", information.getAccountId());
+        response.put("AccountName", information.getAccountName());
+        if (information.getAccountCreatedDate() != null) {
+            // REST-JSON carries a timestamp as epoch seconds, which is what the SDK reads back
+            // into a Date.
+            response.put("AccountCreatedDate",
+                    information.getAccountCreatedDate().toEpochMilli() / 1000.0);
+        }
         return Response.ok(response).build();
     }
 

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -48,6 +49,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1681,6 +1683,50 @@ public class SnsService implements Resettable, ResourceProvider {
         } catch (NoSuchAlgorithmException e) {
             return UUID.randomUUID().toString();
         }
+    }
+
+    /**
+     * The owning account and topic policy of one topic ARN, for the one resource policy lookup.
+     *
+     * <p>The ARN carries the topic's own account and region, so the topic is read out of that
+     * account's partition rather than the caller's: a cross-account publish is exactly the case
+     * the policy decides, and reading it from the caller's partition would find nothing. A topic
+     * that exists and carries no {@code Policy} attribute is still answered, with none, because
+     * a caller outside its account is refused by that absence.</p>
+     *
+     * @return the topic's owner and policy, or empty when no topic of that ARN exists
+     */
+    public Optional<TopicOwnerPolicy> topicOwnerPolicy(String topicArn) {
+        if (topicArn == null || topicArn.contains("*")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(topicArn);
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+        if (!"sns".equals(arn.service())
+                || arn.accountId() == null || arn.accountId().isBlank()
+                || arn.region() == null || arn.region().isBlank()
+                || arn.resource() == null || arn.resource().isBlank()) {
+            return Optional.empty();
+        }
+        String key = topicKey(arn.region(), topicArn);
+        Optional<Topic> topic;
+        if (topicStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Topic> typed = (AccountAwareStorageBackend<Topic>) aware;
+            topic = typed.getForAccount(arn.accountId(), key);
+        } else {
+            topic = topicStore.get(key);
+        }
+        return topic.map(found ->
+                new TopicOwnerPolicy(arn.accountId(), found.getAttributes().get("Policy")));
+    }
+
+    /** A topic's owning account and its topic policy, or null where it carries none. */
+    public record TopicOwnerPolicy(String ownerAccountId, String policy) {
     }
 
     private static String topicKey(String region, String arn) {

@@ -93,6 +93,14 @@ public class IamActionRegistry {
         rule("apigateway", "DELETE", ".*/restapis/.+",                      "apigateway:DELETE"),
         rule("apigateway", "POST",   ".*/restapis/.+",                      "apigateway:POST"),
 
+        // ── Account Management ─────────────────────────────────────────────────
+        // A REST-JSON service whose operation is its path. Without these rules every account
+        // call is an action the registry cannot name, which under enforcement is refused, so
+        // the baseline's alternate contacts could not be written at all.
+        rule("account", "POST", "^/putAlternateContact/?$",   "account:PutAlternateContact"),
+        rule("account", "POST", "^/getAlternateContact/?$",   "account:GetAlternateContact"),
+        rule("account", "POST", "^/getAccountInformation/?$", "account:GetAccountInformation"),
+
         // ── Kinesis ────────────────────────────────────────────────────────────
         rule("kinesis", "POST", ".*", "kinesis:*")
     );

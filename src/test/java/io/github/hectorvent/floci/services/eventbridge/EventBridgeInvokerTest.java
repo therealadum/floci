@@ -66,6 +66,7 @@ class EventBridgeInvokerTest {
                 new io.github.hectorvent.floci.services.ecs.EcsJsonHandler(ecsService, new ObjectMapper()),
                 regionResolver,
                 new ObjectMapper(),
+                null /* servicePrincipalAuthorizer: no authorization without enforcement */,
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
         );
     }

@@ -81,6 +81,41 @@ class ConfigurationRecorderIntegrationTest {
     @Test
     @Order(3)
     void startConfigurationRecorder() {
+        // A recorder with nowhere to deliver to cannot start, which is what makes the order
+        // PutConfigurationRecorder, PutDeliveryChannel, StartConfigurationRecorder the only one
+        // that works.
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "StartConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorderName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoAvailableDeliveryChannelException"));
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutDeliveryChannel")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "DeliveryChannel": {
+                        "name": "default",
+                        "s3BucketName": "my-config-bucket",
+                        "s3KeyPrefix": "config-snapshots",
+                        "configSnapshotDeliveryProperties": {
+                            "deliveryFrequency": "Twelve_Hours"
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "StartConfigurationRecorder")
             .contentType(CONTENT_TYPE)

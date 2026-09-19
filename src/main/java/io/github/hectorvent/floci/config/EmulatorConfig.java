@@ -818,6 +818,17 @@ public interface EmulatorConfig {
     interface AccountServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * The account name {@code GetAccountInformation} answers for an account that belongs to
+         * no organization. An organization member answers with the name the organization holds
+         * for it, which is what {@code CreateAccount} was given; an account outside one has only
+         * the name it was signed up under, and locally that is this.
+         *
+         * <p>Set in {@code FLOCI_SERVICES_ACCOUNT_STANDALONE_NAME}.</p>
+         */
+        @WithDefault("floci")
+        String standaloneName();
     }
 
     interface AccessAnalyzerServiceConfig {

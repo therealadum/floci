@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.account;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.account.model.AccountInformation;
 import io.github.hectorvent.floci.services.account.model.AlternateContact;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
@@ -13,7 +15,9 @@ import io.github.hectorvent.floci.services.organizations.model.OrganizationAccou
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -24,15 +28,23 @@ public class AccountService implements Resettable {
     private static final Pattern EMAIL = Pattern.compile("\\s*[\\w+=.#|!&-]+@[\\w.-]+\\.[\\w]+\\s*");
     private static final Pattern PHONE = Pattern.compile("[\\s0-9()+-]+");
     private static final Set<String> CONTACT_TYPES = Set.of("BILLING", "OPERATIONS", "SECURITY");
+    /** One account has one account information record, so its key is a constant. */
+    private static final String INFORMATION_KEY = "information";
 
     private final AccountAwareStorageBackend<AlternateContact> contacts;
+    private final AccountAwareStorageBackend<AccountInformation> information;
     private final OrganizationsService organizationsService;
+    private final String standaloneName;
 
     @Inject
-    public AccountService(StorageFactory storageFactory, OrganizationsService organizationsService) {
+    public AccountService(StorageFactory storageFactory, OrganizationsService organizationsService,
+                          EmulatorConfig config) {
         this.contacts = storageFactory.create("account", "account-alternate-contacts.json",
                 new TypeReference<Map<String, AlternateContact>>() {});
+        this.information = storageFactory.create("account", "account-information.json",
+                new TypeReference<Map<String, AccountInformation>>() {});
         this.organizationsService = organizationsService;
+        this.standaloneName = config.services().account().standaloneName();
     }
 
     public void putAlternateContact(String callerAccountId, JsonNode request) {
@@ -53,6 +65,32 @@ public class AccountService implements Resettable {
         return contacts.getForAccount(targetAccountId, type)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The alternate contact does not exist for the specified account and contact type.", 404));
+    }
+
+    /**
+     * The account the credential reaches, or the member a management-account caller names with
+     * {@code AccountId}: its id, its name, and the date it was created.
+     *
+     * <p>An organization member answers from the organization's own record, whose name and
+     * joined date are what {@code CreateAccount} wrote. An account outside an organization has
+     * no such record, so its information is written once, on the first call, and answered
+     * unchanged from then on, since AWS answers the same creation date every time.</p>
+     */
+    public AccountInformation getAccountInformation(String callerAccountId, JsonNode request) {
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        Optional<OrganizationAccount> member = organizationsService.findAccountForPortal(targetAccountId);
+        if (member.isPresent()) {
+            OrganizationAccount account = member.get();
+            return new AccountInformation(targetAccountId, account.getName(),
+                    account.getJoinedTimestamp());
+        }
+        return information.getForAccount(targetAccountId, INFORMATION_KEY)
+                .orElseGet(() -> {
+                    AccountInformation created =
+                            new AccountInformation(targetAccountId, standaloneName, Instant.now());
+                    information.putForAccount(targetAccountId, INFORMATION_KEY, created);
+                    return created;
+                });
     }
 
     private String resolveTargetAccount(String callerAccountId, JsonNode request) {
@@ -105,6 +143,7 @@ public class AccountService implements Resettable {
     @Override
     public void clear() {
         contacts.clear();
+        information.clear();
     }
 
     private static String requireContactType(JsonNode request) {
