@@ -43,6 +43,7 @@ class SsoAdminServiceTest {
     private SsoAdminService service;
     private IdentityStoreService identityStoreService;
     private OrganizationsService organizationsService;
+    private ReservedSsoRoles reservedSsoRoles;
     private InMemoryStorage<String, ApplicationAccessScope> applicationAccessScopes;
     private InMemoryStorage<String, ApplicationAuthenticationMethod> applicationAuthenticationMethods;
     private InMemoryStorage<String, ApplicationGrant> applicationGrants;
@@ -52,6 +53,7 @@ class SsoAdminServiceTest {
     void setUp() {
         identityStoreService = org.mockito.Mockito.mock(IdentityStoreService.class);
         organizationsService = org.mockito.Mockito.mock(OrganizationsService.class);
+        reservedSsoRoles = org.mockito.Mockito.mock(ReservedSsoRoles.class);
         applicationAccessScopes = new InMemoryStorage<>();
         applicationAuthenticationMethods = new InMemoryStorage<>();
         applicationGrants = new InMemoryStorage<>();
@@ -84,6 +86,7 @@ class SsoAdminServiceTest {
                 new InMemoryStorage<String, String>(),
                 identityStoreService,
                 organizationsService,
+                reservedSsoRoles,
                 ACCOUNT_ID,
                 "us-east-1");
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
@@ -1860,6 +1863,7 @@ class SsoAdminServiceTest {
                 new InMemoryStorage<String, String>(),
                 identityStoreService,
                 organizationsService,
+                reservedSsoRoles,
                 "999999999999",
                 "us-east-1");
     }

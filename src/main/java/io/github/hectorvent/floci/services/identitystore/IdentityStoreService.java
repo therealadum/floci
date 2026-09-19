@@ -170,6 +170,33 @@ public class IdentityStoreService implements Resettable {
         return user;
     }
 
+    /**
+     * The user an address stands for, created if the store has none with that {@code UserName}.
+     *
+     * <p>This is the emulator's stand-in for Google Workspace's SCIM provisioning: the address is
+     * the {@code UserName} and the primary email alike, which is the shape
+     * {@code ListUsers} with a {@code UserName} filter and {@code GetUserId} with the
+     * {@code userName} or {@code emails.value} alternate identifier all resolve by. Idempotent, so
+     * a restart against the same volume finds the person already there and leaves them alone.
+     */
+    public synchronized User provisionUser(String storeId, String emailAddress) {
+        String store = requireStore(storeId);
+        List<User> existing = listUsersAll(store, emailAddress);
+        if (!existing.isEmpty()) {
+            return existing.get(0);
+        }
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("UserName", emailAddress);
+        ObjectNode email = attributes.putArray("Emails").addObject();
+        email.put("Value", emailAddress);
+        email.put("Type", "work");
+        email.put("Primary", true);
+        String now = Instant.now().toString();
+        User user = new User(resourceId(store), store, attributes, now, now);
+        users.putForAccount(GLOBAL_PARTITION, userKey(store, user.userId()), user);
+        return user;
+    }
+
     public PaginatedResult<User> listUsers(JsonNode request) {
         String storeId = requireStore(required(request, "IdentityStoreId"));
         String userName = filterValue(request, "UserName");

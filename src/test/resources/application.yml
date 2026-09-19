@@ -412,6 +412,7 @@ floci:
     identitystore:
       enabled: true
       scim-bearer-token: ${FLOCI_SERVICES_IDENTITYSTORE_SCIM_BEARER_TOKEN:floci-scim-token}
+      provisioned-users: ${FLOCI_SERVICES_IDENTITYSTORE_PROVISIONED_USERS:}
     budgets:
       enabled: true
     inspector2:

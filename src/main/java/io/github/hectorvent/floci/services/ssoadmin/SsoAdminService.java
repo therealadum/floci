@@ -125,12 +125,14 @@ public class SsoAdminService implements Resettable {
     private final StorageBackend<String, String> trustedTokenIssuerClientTokens;
     private final IdentityStoreService identityStoreService;
     private final OrganizationsService organizationsService;
+    private final ReservedSsoRoles reservedSsoRoles;
     private final String defaultAccountId;
     private final String defaultRegion;
 
     @Inject
     public SsoAdminService(StorageFactory storageFactory, IdentityStoreService identityStoreService,
-                           OrganizationsService organizationsService, EmulatorConfig config) {
+                           OrganizationsService organizationsService, ReservedSsoRoles reservedSsoRoles,
+                           EmulatorConfig config) {
         this(
                 storageFactory.create("ssoadmin", "ssoadmin-permission-sets.json", new TypeReference<Map<String, PermissionSet>>() {}),
                 storageFactory.create("ssoadmin", "ssoadmin-assignments.json", new TypeReference<Map<String, Assignment>>() {}),
@@ -159,6 +161,7 @@ public class SsoAdminService implements Resettable {
                 storageFactory.create("ssoadmin", "ssoadmin-trusted-token-issuer-client-tokens.json", new TypeReference<Map<String, String>>() {}),
                 identityStoreService,
                 organizationsService,
+                reservedSsoRoles,
                 config.defaultAccountId(),
                 config.defaultRegion());
     }
@@ -190,6 +193,7 @@ public class SsoAdminService implements Resettable {
                     StorageBackend<String, String> trustedTokenIssuerClientTokens,
                     IdentityStoreService identityStoreService,
                     OrganizationsService organizationsService,
+                    ReservedSsoRoles reservedSsoRoles,
                     String defaultAccountId,
                     String defaultRegion) {
         this.permissionSets = permissionSets;
@@ -219,6 +223,7 @@ public class SsoAdminService implements Resettable {
         this.trustedTokenIssuerClientTokens = trustedTokenIssuerClientTokens;
         this.identityStoreService = identityStoreService;
         this.organizationsService = organizationsService;
+        this.reservedSsoRoles = reservedSsoRoles;
         this.defaultAccountId = defaultAccountId;
         this.defaultRegion = defaultRegion;
         ensureBootstrapInstance(defaultAccountId, defaultRegion);
@@ -1533,7 +1538,7 @@ public class SsoAdminService implements Resettable {
         if (instance.accountInstance()) {
             throw accessDenied("Permission sets are only available from an organization instance.");
         }
-        getPermissionSet(instanceArn, permissionSetArn);
+        PermissionSet deleted = getPermissionSet(instanceArn, permissionSetArn);
         permissionSets.delete(permissionSetArn);
         resourceTagOverrides.delete(permissionSetArn);
         for (String key : new ArrayList<>(assignments.keys())) {
@@ -1546,6 +1551,7 @@ public class SsoAdminService implements Resettable {
             PermissionSetProvisioning provisioning = permissionSetProvisionings.get(key).orElse(null);
             if (provisioning != null && permissionSetArn.equals(provisioning.permissionSetArn())) {
                 permissionSetProvisionings.delete(key);
+                reservedSsoRoles.remove(provisioning.accountId(), deleted.name());
             }
         }
     }
@@ -1861,10 +1867,34 @@ public class SsoAdminService implements Resettable {
         return operation;
     }
 
+    /**
+     * Records the provisioning and provisions the permission set's role into the target account,
+     * which is what makes the permission set reachable there: the role is the thing a SAML session
+     * assumes and the thing another account's trust policy names.
+     */
     private void ensurePermissionSetProvisioned(String permissionSetArn, String accountId) {
         String key = permissionSetArn + "::" + accountId;
         permissionSetProvisionings.put(key, new PermissionSetProvisioning(
                 permissionSetArn, accountId, "LATEST_PERMISSION_SET_PROVISIONED"));
+        permissionSets.get(permissionSetArn)
+                .ifPresent(permissionSet -> reservedSsoRoles.provision(accountId, permissionSet));
+    }
+
+    /**
+     * Deprovisions the permission set from the account once its last assignment there is gone: the
+     * provisioning record goes, so {@code ListAccountsForProvisionedPermissionSet} stops naming the
+     * account, and the account's reserved role goes with it.
+     */
+    private void deprovisionIfLastAssignment(String permissionSetArn, String accountId) {
+        boolean stillAssigned = assignments.scan(key -> true).stream()
+                .anyMatch(assignment -> permissionSetArn.equals(assignment.permissionSetArn())
+                        && accountId.equals(assignment.accountId()));
+        if (stillAssigned) {
+            return;
+        }
+        permissionSetProvisionings.delete(permissionSetArn + "::" + accountId);
+        permissionSets.get(permissionSetArn)
+                .ifPresent(permissionSet -> reservedSsoRoles.remove(accountId, permissionSet.name()));
     }
 
     public PaginatedResult<String> listPermissionSetsProvisionedToAccount(JsonNode request) {
@@ -1976,6 +2006,7 @@ public class SsoAdminService implements Resettable {
             throw notFound("Account assignment not found.");
         }
         assignments.delete(key);
+        deprovisionIfLastAssignment(permission, account);
         String requestId = UUID.randomUUID().toString();
         AssignmentDeletionOperation operation = new AssignmentDeletionOperation(
                 requestId, "SUCCEEDED", System.currentTimeMillis(), account, permission, principal, principalType, null);

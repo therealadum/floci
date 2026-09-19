@@ -831,6 +831,18 @@ public interface EmulatorConfig {
 
         @WithDefault("floci-scim-token")
         String scimBearerToken();
+
+        /**
+         * The people the identity store holds from the start, one email address each. On AWS a
+         * person arrives in the identity store because Google Workspace provisions them over SCIM;
+         * locally there is no Google, so the emulator's start configuration carries the same list.
+         * Each address becomes a user whose {@code UserName} and primary email are the address,
+         * created once and left alone on every later start.
+         *
+         * <p>Set as a comma-separated list in
+         * {@code FLOCI_SERVICES_IDENTITYSTORE_PROVISIONED_USERS}.
+         */
+        Optional<List<String>> provisionedUsers();
     }
 
     interface BudgetsServiceConfig {
