@@ -2055,6 +2055,56 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         sessionPolicyDocument, originAccountId));
     }
 
+    /**
+     * Records the session tags {@code AssumeRole} was given on an already-registered session, and
+     * which of their keys are transitive. Kept apart from the {@code registerSession} overloads:
+     * every other caller of those mints a session that carries no tags at all.
+     */
+    public void registerSessionTags(String sessionAccessKeyId, Map<String, String> sessionTags,
+                                    List<String> transitiveTagKeys) {
+        if (sessionTags == null || sessionTags.isEmpty()) {
+            return;
+        }
+        findSessionAnyAccount(sessionAccessKeyId).ifPresent(session -> {
+            session.setSessionTags(sessionTags);
+            session.setTransitiveTagKeys(transitiveTagKeys);
+            String accountId = session.getOriginAccountId();
+            if (accountId != null && !accountId.isBlank()
+                    && sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+                aware.putForAccount(accountId, sessionAccessKeyId, session);
+            } else {
+                sessions.put(sessionAccessKeyId, session);
+            }
+        });
+    }
+
+    /**
+     * The session tags of the credential {@code accessKeyId} names, which the enforcement filter
+     * puts in front of every policy as {@code aws:PrincipalTag/<key>}. Empty for a credential that
+     * is not a tagged session.
+     */
+    public Map<String, String> sessionTags(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .map(SessionCredential::getSessionTags)
+                .orElseGet(Map::of);
+    }
+
+    /** The transitive subset of {@link #sessionTags}, which carries into the next role assumed. */
+    public Map<String, String> transitiveSessionTags(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .map(session -> {
+                    Map<String, String> transitive = new java.util.LinkedHashMap<>();
+                    for (String key : session.getTransitiveTagKeys()) {
+                        String value = session.getSessionTags().get(key);
+                        if (value != null) {
+                            transitive.put(key, value);
+                        }
+                    }
+                    return transitive;
+                })
+                .orElseGet(Map::of);
+    }
+
     /** Stores a temporary session in an explicit account namespace. */
     public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
                                           String roleArn, java.time.Instant expiration,

@@ -463,6 +463,21 @@ public class IamPolicyEvaluator {
     // -----------------------------------------------------------------------
 
     /**
+     * Evaluates a statement's raw {@code Condition} element against a request's condition context.
+     *
+     * <p>For the one policy kind this class cannot evaluate whole: a trust policy carries no
+     * {@code Resource}, so {@link AssumeRolePolicyEvaluator} matches its actions and principals
+     * itself and hands the conditions here, rather than keeping a second reading of AWS's
+     * operators, quantifiers and {@code IfExists} forms that could drift from this one.
+     *
+     * @param conditionNode the statement's {@code Condition} value, or null when it carries none,
+     *                      which always matches
+     */
+    public boolean conditionsMatch(JsonNode conditionNode, Map<String, List<String>> conditionCtx) {
+        return matchesConditions(parseConditions(conditionNode), normalizeConditionContext(conditionCtx));
+    }
+
+    /**
      * Evaluates all condition blocks. AND between blocks, OR within each block's value list.
      * Returns true if ALL blocks pass (or there are no conditions).
      */

@@ -249,7 +249,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // aws:PrincipalOrgID and aws:PrincipalOrgPaths. They are set here rather than in
         // IamConditionContextResolver because that resolver answers per service and these apply
         // to every request, whatever the service.
-        Map<String, List<String>> principalKeys = principalConditionKeys(principal, accountId);
+        Map<String, List<String>> principalKeys = principalConditionKeys(akid, principal, accountId);
         List<Map<String, List<String>>> targetContexts = new ArrayList<>();
         targetContexts.add(withKeys(conditionContext, principalKeys));
         for (Map<String, List<String>> target : remainingTargets) {
@@ -355,7 +355,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             ResourcePolicies resourcePolicies = resourcePolicyLookup.policiesFor(resource);
             String resourceAccountId = resourceAccountOf(resourcePolicies, resource);
             Map<String, List<String>> conditionContext = withKeys(
-                    principalConditionKeys(principal, accountId),
+                    principalConditionKeys(akid, principal, accountId),
                     resourceConditionKeys(resourceAccountId));
             List<List<String>> rcpLevels =
                     resourceControlPolicyLevels(serviceOf(action), resourceAccountId, principal);
@@ -377,15 +377,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * The condition keys that describe the caller: its ARN, its account, and, when that account
-     * belongs to an organization, that organization's id and the account's organization path. An
-     * account in no organization carries none of the organization keys, exactly as on AWS.
+     * The condition keys that describe the caller: its ARN, its account, whether it is an AWS
+     * service, its session tags, and, when that account belongs to an organization, that
+     * organization's id and the account's organization path. An account in no organization carries
+     * none of the organization keys, exactly as on AWS.
+     *
+     * <p>{@code aws:SourceOrgID} and {@code aws:SourceOrgPaths} are deliberately absent. AWS sets
+     * them only where a service calls on behalf of a resource that belongs to an organization, and
+     * they describe that source resource's organization, not the caller's. Nothing in this
+     * emulator makes such a call, so writing a value here would be inventing one: a policy reading
+     * them behaves as it does on AWS for a call no service made, which is the case at hand.
      */
-    private Map<String, List<String>> principalConditionKeys(RequestPrincipal principal, String accountId) {
+    private Map<String, List<String>> principalConditionKeys(String akid, RequestPrincipal principal,
+                                                             String accountId) {
         Map<String, List<String>> keys = new HashMap<>();
         if (principal != null && principal.arn() != null) {
             keys.put("aws:PrincipalArn", List.of(principal.arn()));
         }
+        // Present on every request, false for anything that signs with a credential, which is
+        // everything that reaches this filter.
+        keys.put("aws:PrincipalIsAWSService",
+                List.of(Boolean.toString(principal != null && principal.service() != null)));
+        iamService.sessionTags(akid)
+                .forEach((tag, value) -> keys.put("aws:PrincipalTag/" + tag, List.of(value)));
         String principalAccount = principal != null && principal.accountId() != null
                 ? principal.accountId() : accountId;
         if (principalAccount != null) {

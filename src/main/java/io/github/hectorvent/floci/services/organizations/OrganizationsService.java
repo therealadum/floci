@@ -328,7 +328,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         // list, so what ListRoots reports is exactly what Enable/DisablePolicyType has set.
         organization.setRoot(root);
 
-        organizations.putForAccount(callerAccountId, organizationId, organization);
+        save(organizations, callerAccountId, organizationId, organization);
 
         OrganizationAccount master = new OrganizationAccount();
         master.setId(callerAccountId);
@@ -341,7 +341,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         master.setJoinedTimestamp(organization.getCreatedTimestamp());
         master.setOrganizationId(organizationId);
         master.setParentId(rootId);
-        accounts.putForAccount(callerAccountId, callerAccountId, master);
+        save(accounts, callerAccountId, callerAccountId, master);
 
         createFullAwsAccessPolicy(organization, rootId, callerAccountId);
 
@@ -375,12 +375,12 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         // organization row itself — its root and the policy types enabled on that root. Nothing
         // survives for the next CreateOrganization to inherit.
         String master = organization.getMasterAccountId();
-        policiesIn(organization).forEach(policy -> policies.deleteForAccount(master, policy.getId()));
-        members.forEach(account -> accounts.deleteForAccount(master, account.getId()));
-        handshakesIn(organization).forEach(handshake -> handshakes.deleteForAccount(master, handshake.getId()));
+        policiesIn(organization).forEach(policy -> remove(policies, master, policy.getId()));
+        members.forEach(account -> remove(accounts, master, account.getId()));
+        handshakesIn(organization).forEach(handshake -> remove(handshakes, master, handshake.getId()));
         createAccountStatusesIn(organization)
-                .forEach(status -> createAccountStatuses.deleteForAccount(master, status.getId()));
-        organizations.deleteForAccount(master, organization.getId());
+                .forEach(status -> remove(createAccountStatuses, master, status.getId()));
+        remove(organizations, master, organization.getId());
 
         LOG.infov("Deleted organization {0}", organization.getId());
     }
@@ -406,7 +406,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             handshake.setState(HANDSHAKE_ACCEPTED);
             applyEnableAllFeatures(organization);
         }
-        handshakes.putForAccount(organization.getMasterAccountId(), handshake.getId(), handshake);
+        save(handshakes, organization.getMasterAccountId(), handshake.getId(), handshake);
         return handshake;
     }
 
@@ -442,7 +442,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         if (tags != null) {
             unit.getTags().putAll(tags);
         }
-        organizationalUnits.putForAccount(organization.getMasterAccountId(), ouId, unit);
+        save(organizationalUnits, organization.getMasterAccountId(), ouId, unit);
 
         attachDefaultPolicies(organization, ouId);
         return unit;
@@ -464,7 +464,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                     "An OU with the name " + name + " already exists under this parent.", 400);
         }
         unit.setName(name);
-        organizationalUnits.putForAccount(organization.getMasterAccountId(), ouId, unit);
+        save(organizationalUnits, organization.getMasterAccountId(), ouId, unit);
         return unit;
     }
 
@@ -482,7 +482,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         }
 
         detachAllPoliciesFrom(organization, ouId);
-        organizationalUnits.deleteForAccount(organization.getMasterAccountId(), unit.getId());
+        remove(organizationalUnits, organization.getMasterAccountId(), unit.getId());
     }
 
     public OrganizationalUnit describeOrganizationalUnit(String callerAccountId, String ouId) {
@@ -567,13 +567,13 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             status.setState("FAILED");
             status.setFailureReason("EMAIL_ALREADY_EXISTS");
             status.setCompletedTimestamp(Instant.now());
-            createAccountStatuses.putForAccount(organization.getMasterAccountId(), status.getId(), status);
+            save(createAccountStatuses, organization.getMasterAccountId(), status.getId(), status);
             return status;
         }
 
         String newAccountId = allocateAccountId(organization);
         OrganizationAccount account = newMemberAccount(organization, newAccountId, email, accountName, "CREATED");
-        accounts.putForAccount(organization.getMasterAccountId(), newAccountId, account);
+        save(accounts, organization.getMasterAccountId(), newAccountId, account);
         attachDefaultPolicies(organization, newAccountId);
         createEntryRole(newAccountId, entryRoleName, organization.getMasterAccountId());
 
@@ -583,7 +583,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         if (govCloud) {
             status.setGovCloudAccountId(allocateAccountId(organization));
         }
-        createAccountStatuses.putForAccount(organization.getMasterAccountId(), status.getId(), status);
+        save(createAccountStatuses, organization.getMasterAccountId(), status.getId(), status);
 
         LOG.infov("Created account {0} ({1}) in organization {2}", newAccountId, accountName, organization.getId());
         return status;
@@ -674,7 +674,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                     "The account " + accountId + " is already in " + destinationParentId + ".", 400);
         }
         account.setParentId(destinationParentId);
-        accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
+        save(accounts, organization.getMasterAccountId(), accountId, account);
     }
 
     public void removeAccountFromOrganization(String callerAccountId, String accountId) {
@@ -685,7 +685,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                     "The management account can't be removed from the organization.", 400);
         }
         detachAllPoliciesFrom(organization, account.getId());
-        accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
+        remove(accounts, organization.getMasterAccountId(), account.getId());
     }
 
     public void leaveOrganization(String callerAccountId) {
@@ -696,7 +696,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         }
         OrganizationAccount account = requireAccount(organization, callerAccountId);
         detachAllPoliciesFrom(organization, account.getId());
-        accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
+        remove(accounts, organization.getMasterAccountId(), account.getId());
     }
 
     public OrganizationAccount closeAccount(String callerAccountId, String accountId) {
@@ -708,7 +708,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         }
         account.setStatus(STATUS_SUSPENDED);
         account.setState(STATE_CLOSED);
-        accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
+        save(accounts, organization.getMasterAccountId(), accountId, account);
         return account;
     }
 
@@ -746,7 +746,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         if (tags != null) {
             policy.getTags().putAll(tags);
         }
-        policies.putForAccount(organization.getMasterAccountId(), policy.getId(), policy);
+        save(policies, organization.getMasterAccountId(), policy.getId(), policy);
         return policy;
     }
 
@@ -780,7 +780,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             }
             policy.setContent(content);
         }
-        policies.putForAccount(organization.getMasterAccountId(), policyId, policy);
+        save(policies, organization.getMasterAccountId(), policyId, policy);
         return policy;
     }
 
@@ -793,7 +793,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                     "The policy " + policyId + " is still attached to " + policy.getTargets().size()
                             + " target(s). Detach it before deleting.", 400);
         }
-        policies.deleteForAccount(organization.getMasterAccountId(), policyId);
+        remove(policies, organization.getMasterAccountId(), policyId);
     }
 
     public OrganizationPolicy describePolicy(String callerAccountId, String policyId) {
@@ -818,7 +818,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             throw new AwsException("DuplicatePolicyAttachmentException",
                     "The policy " + policyId + " is already attached to " + targetId + ".", 400);
         }
-        policies.putForAccount(organization.getMasterAccountId(), policyId, policy);
+        save(policies, organization.getMasterAccountId(), policyId, policy);
     }
 
     public void detachPolicy(String callerAccountId, String policyId, String targetId) {
@@ -829,16 +829,19 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             throw new AwsException("PolicyNotAttachedException",
                     "The policy " + policyId + " is not attached to " + targetId + ".", 400);
         }
-        // AWS requires every target to keep at least one SCP; detaching the last one would leave
-        // it with no allow statement at all, so the API rejects it rather than silently locking
-        // the target out.
-        if (SERVICE_CONTROL_POLICY.equals(policy.getType())
-                && countAttachedPolicies(organization, targetId, SERVICE_CONTROL_POLICY) <= 1) {
+        // AWS requires every target to keep at least one policy of each enabled access-control
+        // type; detaching the last one would leave it at a level with no allow statement at all,
+        // so the API rejects it rather than silently locking the target out. The way to have no
+        // policy of a type on a target is to disable the type on the root, which detaches the
+        // default policy from everything at once.
+        if (isAccessControlPolicyType(policy.getType())
+                && countAttachedPolicies(organization, targetId, policy.getType()) <= 1) {
             throw new AwsException("ConstraintViolationException",
-                    "You can't detach the last service control policy from " + targetId + ".", 400);
+                    "You can't detach the last " + policyTypeInWords(policy.getType())
+                            + " from " + targetId + ".", 400);
         }
         policy.getTargets().remove(targetId);
-        policies.putForAccount(organization.getMasterAccountId(), policyId, policy);
+        save(policies, organization.getMasterAccountId(), policyId, policy);
     }
 
     public List<OrganizationPolicy> listPoliciesForTarget(String callerAccountId, String targetId, String filter) {
@@ -881,7 +884,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         } else {
             root.getPolicyTypes().add(new PolicyTypeSummary(policyType, "ENABLED"));
         }
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        save(organizations, organization.getMasterAccountId(), organization.getId(), organization);
         if (RESOURCE_CONTROL_POLICY.equals(policyType)) {
             createRcpFullAwsAccessPolicy(organization);
         }
@@ -897,8 +900,21 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                 .orElseThrow(() -> new AwsException("PolicyTypeNotEnabledException",
                         "The policy type " + policyType + " is not enabled for this root.", 400));
         root.getPolicyTypes().remove(summary);
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        save(organizations, organization.getMasterAccountId(), organization.getId(), organization);
+        if (RESOURCE_CONTROL_POLICY.equals(policyType)) {
+            removeRcpFullAwsAccessPolicy(organization);
+        }
         return root;
+    }
+
+    /** The two types whose targets AWS keeps a default policy attached to while the type is on. */
+    private static boolean isAccessControlPolicyType(String policyType) {
+        return SERVICE_CONTROL_POLICY.equals(policyType) || RESOURCE_CONTROL_POLICY.equals(policyType);
+    }
+
+    private static String policyTypeInWords(String policyType) {
+        return RESOURCE_CONTROL_POLICY.equals(policyType)
+                ? "resource control policy" : "service control policy";
     }
 
     /**
@@ -1012,7 +1028,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                 });
 
         if (guardrail.getTargets().addAll(targetIds) || guardrail.getTargets().isEmpty()) {
-            policies.putForAccount(organization.getMasterAccountId(), guardrail.getId(), guardrail);
+            save(policies, organization.getMasterAccountId(), guardrail.getId(), guardrail);
         }
     }
 
@@ -1039,10 +1055,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         if (accountId == null || accountId.isBlank()) {
             return Optional.empty();
         }
-        return findOrganizationForAccount(accountId).map(organization -> new AccountOrganization(
-                organization.getId(),
-                organizationPathIn(organization, accountId),
-                accountId.equals(organization.getMasterAccountId())));
+        return Optional.ofNullable(index().placeByAccount().get(accountId));
     }
 
     /**
@@ -1067,11 +1080,11 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         if (!scpEnforcementEnabled || accountId == null || accountId.isBlank()) {
             return null;
         }
-        Optional<Organization> found = findOrganizationForAccount(accountId);
-        if (found.isEmpty()) {
+        OrganizationIndex index = index();
+        Organization organization = index.organizationByAccount().get(accountId);
+        if (organization == null) {
             return null;
         }
-        Organization organization = found.get();
         if (accountId.equals(organization.getMasterAccountId())) {
             return null;
         }
@@ -1080,9 +1093,10 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         if (!typeEnabled) {
             return null;
         }
-        List<OrganizationPolicy> organizationPolicies = policiesIn(organization);
+        List<OrganizationPolicy> organizationPolicies =
+                index.policiesByOrganization().getOrDefault(organization.getId(), List.of());
         List<List<String>> levels = new ArrayList<>();
-        for (String node : ancestryOf(organization, accountId)) {
+        for (String node : index.ancestryByAccount().getOrDefault(accountId, List.of())) {
             List<String> documents = organizationPolicies.stream()
                     .filter(policy -> policyType.equals(policy.getType())
                             && policy.getTargets().contains(node))
@@ -1127,7 +1141,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         Organization organization = requireManagementAccount(callerAccountId);
         validateServicePrincipal(servicePrincipal);
         organization.getEnabledServicePrincipals().putIfAbsent(servicePrincipal, Instant.now());
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        save(organizations, organization.getMasterAccountId(), organization.getId(), organization);
     }
 
     public void disableAWSServiceAccess(String callerAccountId, String servicePrincipal) {
@@ -1141,7 +1155,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                             + " before disabling trusted access.", 400);
         }
         organization.getEnabledServicePrincipals().remove(servicePrincipal);
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        save(organizations, organization.getMasterAccountId(), organization.getId(), organization);
     }
 
     public List<EnabledServicePrincipal> listAWSServiceAccessForOrganization(String callerAccountId) {
@@ -1165,10 +1179,17 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                     "The account " + accountId + " is already a delegated administrator for "
                             + servicePrincipal + ".", 400);
         }
-        organization.getEnabledServicePrincipals().putIfAbsent(servicePrincipal, Instant.now());
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        // Trusted access for the service comes first. AWS refuses the registration otherwise,
+        // with the ConstraintViolationException reason SERVICE_ACCESS_NOT_ENABLED, and enabling
+        // trusted access here instead would hide the ordering the caller has to get right.
+        if (!organization.getEnabledServicePrincipals().containsKey(servicePrincipal)) {
+            throw new AwsException("ConstraintViolationException",
+                    "SERVICE_ACCESS_NOT_ENABLED: you must call EnableAWSServiceAccess for "
+                            + servicePrincipal + " before registering a delegated administrator "
+                            + "for it.", 400);
+        }
         account.getDelegatedServices().put(servicePrincipal, Instant.now());
-        accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
+        save(accounts, organization.getMasterAccountId(), accountId, account);
     }
 
     public void deregisterDelegatedAdministrator(String callerAccountId, String accountId, String servicePrincipal) {
@@ -1180,7 +1201,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                     "The account " + accountId + " is not a delegated administrator for "
                             + servicePrincipal + ".", 400);
         }
-        accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
+        save(accounts, organization.getMasterAccountId(), accountId, account);
     }
 
     public List<OrganizationAccount> listDelegatedAdministrators(String callerAccountId, String servicePrincipal) {
@@ -1233,7 +1254,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             organization.getResourcePolicyTags().clear();
             organization.getResourcePolicyTags().putAll(tags);
         }
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        save(organizations, organization.getMasterAccountId(), organization.getId(), organization);
         return resourcePolicyView(organization);
     }
 
@@ -1256,7 +1277,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         organization.setResourcePolicyArn(null);
         organization.setResourcePolicyContent(null);
         organization.getResourcePolicyTags().clear();
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        save(organizations, organization.getMasterAccountId(), organization.getId(), organization);
     }
 
     // ──────────────────────────── Handshakes ────────────────────────────
@@ -1324,7 +1345,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             handshake.getResources().add(new HandshakeResource(notes, "NOTES"));
         }
 
-        handshakes.putForAccount(organization.getMasterAccountId(), handshake.getId(), handshake);
+        save(handshakes, organization.getMasterAccountId(), handshake.getId(), handshake);
         return handshake;
     }
 
@@ -1351,13 +1372,13 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
                     : "account-" + callerAccountId + "@example.com";
             OrganizationAccount account = newMemberAccount(
                     organization, callerAccountId, email, "invited-" + callerAccountId, "INVITED");
-            accounts.putForAccount(organization.getMasterAccountId(), callerAccountId, account);
+            save(accounts, organization.getMasterAccountId(), callerAccountId, account);
             attachDefaultPolicies(organization, callerAccountId);
             handshake.setTargetAccountId(callerAccountId);
         }
 
         handshake.setState(HANDSHAKE_ACCEPTED);
-        handshakes.putForAccount(organization.getMasterAccountId(), handshakeId, handshake);
+        save(handshakes, organization.getMasterAccountId(), handshakeId, handshake);
         return handshake;
     }
 
@@ -1367,7 +1388,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         requireOpen(handshake);
         requireInvitee(handshake, callerAccountId);
         handshake.setState(HANDSHAKE_DECLINED);
-        handshakes.putForAccount(organization.getMasterAccountId(), handshakeId, handshake);
+        save(handshakes, organization.getMasterAccountId(), handshakeId, handshake);
         return handshake;
     }
 
@@ -1379,7 +1400,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
             throw accessDenied("Only the account that sent the invitation can cancel it.");
         }
         handshake.setState(HANDSHAKE_CANCELED);
-        handshakes.putForAccount(organization.getMasterAccountId(), handshakeId, handshake);
+        save(handshakes, organization.getMasterAccountId(), handshakeId, handshake);
         return handshake;
     }
 
@@ -1489,9 +1510,116 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
     }
 
     public boolean isManagementAccount(String accountId) {
-        return findOrganizationForAccount(accountId)
-                .map(organization -> accountId.equals(organization.getMasterAccountId()))
-                .orElse(false);
+        return organizationOf(accountId).map(AccountOrganization::managementAccount).orElse(false);
+    }
+
+    // ──────────────────────────── The held organization lookup ────────────────────────────
+
+    /**
+     * Where every account sits, resolved once and read from memory afterwards.
+     *
+     * <p>{@code IamEnforcementFilter} asks for the caller's organization, the resource owner's
+     * organization and both control-policy chains on every single request. Each of those walked
+     * the stores from end to end — organizations, then accounts, then the OU chain a level at a
+     * time — so the cost of a request grew with the size of the organization: measured over the
+     * four calls one request makes, 7.8µs at sixteen accounts and 12.7µs at sixty-four, all of it
+     * scanning. Held here, the same four calls are map lookups.
+     *
+     * <p>It is dropped, never patched, by {@link #save} and {@link #remove}, the one pair every
+     * write in this service goes through, so no change to the organization can outrun it.
+     */
+    private record OrganizationIndex(
+            Map<String, Organization> organizationByAccount,
+            Map<String, AccountOrganization> placeByAccount,
+            Map<String, List<String>> ancestryByAccount,
+            Map<String, List<OrganizationPolicy>> policiesByOrganization) {
+    }
+
+    private volatile OrganizationIndex organizationIndex;
+
+    /** Writes a value and drops the held lookup, which the next read rebuilds. */
+    private <T> void save(AccountAwareStorageBackend<T> store, String accountId, String key, T value) {
+        store.putForAccount(accountId, key, value);
+        organizationIndex = null;
+    }
+
+    /** Deletes a value and drops the held lookup, which the next read rebuilds. */
+    private <T> void remove(AccountAwareStorageBackend<T> store, String accountId, String key) {
+        store.deleteForAccount(accountId, key);
+        organizationIndex = null;
+    }
+
+    private OrganizationIndex index() {
+        OrganizationIndex held = organizationIndex;
+        if (held != null) {
+            return held;
+        }
+        synchronized (this) {
+            if (organizationIndex == null) {
+                organizationIndex = buildIndex();
+            }
+            return organizationIndex;
+        }
+    }
+
+    /** One pass over each store, from which every account's organization, path and chain follows. */
+    private OrganizationIndex buildIndex() {
+        Map<String, Organization> organizationById = new LinkedHashMap<>();
+        for (Organization organization : organizations.scanAllAccounts()) {
+            organizationById.put(organization.getId(), organization);
+        }
+
+        Map<String, String> parentOfChild = new LinkedHashMap<>();
+        for (OrganizationalUnit unit : organizationalUnits.scanAllAccounts()) {
+            parentOfChild.put(unit.getId(), unit.getParentId());
+        }
+
+        Map<String, Organization> organizationByAccount = new LinkedHashMap<>();
+        for (OrganizationAccount account : accounts.scanAllAccounts()) {
+            Organization organization = organizationById.get(account.getOrganizationId());
+            if (organization != null) {
+                organizationByAccount.put(account.getId(), organization);
+                parentOfChild.put(account.getId(), account.getParentId());
+            }
+        }
+
+        Map<String, List<String>> ancestryByAccount = new LinkedHashMap<>();
+        Map<String, AccountOrganization> placeByAccount = new LinkedHashMap<>();
+        organizationByAccount.forEach((accountId, organization) -> {
+            List<String> ancestry = ancestry(organization.getRoot().getId(), accountId, parentOfChild);
+            ancestryByAccount.put(accountId, ancestry);
+            placeByAccount.put(accountId, new AccountOrganization(
+                    organization.getId(),
+                    organization.getId() + "/" + String.join("/", ancestry) + "/",
+                    accountId.equals(organization.getMasterAccountId())));
+        });
+
+        Map<String, List<OrganizationPolicy>> policiesByOrganization = new LinkedHashMap<>();
+        for (OrganizationPolicy policy : policies.scanAllAccounts()) {
+            policiesByOrganization
+                    .computeIfAbsent(policy.getOrganizationId(), key -> new ArrayList<>())
+                    .add(policy);
+        }
+
+        return new OrganizationIndex(organizationByAccount, placeByAccount, ancestryByAccount,
+                policiesByOrganization);
+    }
+
+    /**
+     * The chain from the root down to {@code targetId}, read off the parent map rather than the
+     * stores. It is {@link #ancestryOf}'s walk, and stops on a cycle or a broken parent link
+     * rather than looping, since a held lookup must answer even for data that cannot be walked.
+     */
+    private static List<String> ancestry(String rootId, String targetId, Map<String, String> parentOfChild) {
+        List<String> chain = new ArrayList<>();
+        String current = targetId;
+        while (current != null && !rootId.equals(current) && !chain.contains(current)) {
+            chain.add(current);
+            current = parentOfChild.get(current);
+        }
+        chain.add(rootId);
+        java.util.Collections.reverse(chain);
+        return chain;
     }
 
     private Optional<Organization> findOrganizationForAccount(String accountId) {
@@ -1725,22 +1853,22 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         if (ACCOUNT_ID_PATTERN.matcher(resourceId).matches()) {
             OrganizationAccount account = requireAccount(organization, resourceId);
             return new TagOwner(account.getTags(),
-                    () -> accounts.putForAccount(master, resourceId, account));
+                    () -> save(accounts, master, resourceId, account));
         }
         if (ROOT_ID_PATTERN.matcher(resourceId).matches()) {
             Root root = requireRoot(organization, resourceId);
             return new TagOwner(root.getTags(),
-                    () -> organizations.putForAccount(master, organization.getId(), organization));
+                    () -> save(organizations, master, organization.getId(), organization));
         }
         if (OU_ID_PATTERN.matcher(resourceId).matches()) {
             OrganizationalUnit unit = requireOrganizationalUnit(organization, resourceId);
             return new TagOwner(unit.getTags(),
-                    () -> organizationalUnits.putForAccount(master, resourceId, unit));
+                    () -> save(organizationalUnits, master, resourceId, unit));
         }
         if (POLICY_ID_PATTERN.matcher(resourceId).matches()) {
             OrganizationPolicy policy = requirePolicy(organization, resourceId);
             return new TagOwner(policy.getTags(),
-                    () -> policies.putForAccount(master, resourceId, policy));
+                    () -> save(policies, master, resourceId, policy));
         }
         throw new AwsException("TargetNotFoundException",
                 "We can't find a resource with the ResourceId " + resourceId + ".", 400);
@@ -1767,7 +1895,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         policy.setArn(policyArn(organization, FULL_AWS_ACCESS_POLICY_ID, SERVICE_CONTROL_POLICY));
         policy.getTargets().add(rootId);
         policy.getTargets().add(masterAccountId);
-        policies.putForAccount(masterAccountId, FULL_AWS_ACCESS_POLICY_ID, policy);
+        save(policies, masterAccountId, FULL_AWS_ACCESS_POLICY_ID, policy);
     }
 
     /**
@@ -1790,7 +1918,18 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         policy.getTargets().add(organization.getRoot().getId());
         organizationalUnitsIn(organization).forEach(unit -> policy.getTargets().add(unit.getId()));
         accountsIn(organization).forEach(account -> policy.getTargets().add(account.getId()));
-        policies.putForAccount(master, RCP_FULL_AWS_ACCESS_POLICY_ID, policy);
+        save(policies, master, RCP_FULL_AWS_ACCESS_POLICY_ID, policy);
+    }
+
+    /**
+     * Removes RCPFullAWSAccess from the organization, which is what disabling the
+     * {@code RESOURCE_CONTROL_POLICY} type does on AWS: the default policy is detached from the
+     * root, every OU and every account, and is gone from the organization's policies until the
+     * type is enabled again. It is the one way a target ends up with no resource control policy,
+     * since {@link #detachPolicy} refuses to take the last one away.
+     */
+    private void removeRcpFullAwsAccessPolicy(Organization organization) {
+        remove(policies, organization.getMasterAccountId(), RCP_FULL_AWS_ACCESS_POLICY_ID);
     }
 
     /**
@@ -1807,14 +1946,14 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         policies.getForAccount(organization.getMasterAccountId(), policyId)
                 .ifPresent(policy -> {
                     policy.getTargets().add(targetId);
-                    policies.putForAccount(organization.getMasterAccountId(), policyId, policy);
+                    save(policies, organization.getMasterAccountId(), policyId, policy);
                 });
     }
 
     private void detachAllPoliciesFrom(Organization organization, String targetId) {
         for (OrganizationPolicy policy : policiesIn(organization)) {
             if (policy.getTargets().remove(targetId)) {
-                policies.putForAccount(organization.getMasterAccountId(), policy.getId(), policy);
+                save(policies, organization.getMasterAccountId(), policy.getId(), policy);
             }
         }
     }
@@ -1888,7 +2027,7 @@ public class OrganizationsService implements ScpProvider, OrganizationProvider {
         // Promotion makes the access-control policy types available, and nothing more: the root
         // keeps whatever EnablePolicyType has enabled on it, which is nothing until it is called.
         organization.setFeatureSet(FEATURE_SET_ALL);
-        organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
+        save(organizations, organization.getMasterAccountId(), organization.getId(), organization);
     }
 
     /** A handshake left open past its expiry reports EXPIRED without needing a sweeper. */

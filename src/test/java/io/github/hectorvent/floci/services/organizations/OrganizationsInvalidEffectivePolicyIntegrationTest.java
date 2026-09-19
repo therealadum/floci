@@ -164,6 +164,14 @@ class OrganizationsInvalidEffectivePolicyIntegrationTest {
     @Test
     @Order(9)
     void registerMemberAsDelegatedAdministrator() {
+        // Trusted access for the service comes first, as it does on AWS.
+        organizations(MANAGEMENT_ACCOUNT, "EnableAWSServiceAccess",
+                "{\"ServicePrincipal\":\"config.amazonaws.com\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         organizations(MANAGEMENT_ACCOUNT, "RegisterDelegatedAdministrator",
                 "{\"AccountId\":\"" + memberAccountId + "\",\"ServicePrincipal\":\"config.amazonaws.com\"}")
         .when()

@@ -7,6 +7,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -35,19 +37,37 @@ public class AssumeRolePolicyEvaluator {
             "^arn:(" + AwsArnUtils.PARTITION_REGEX + "):sts::(\\d{12}):assumed-role/([^/]+)/.*$");
 
     private final ObjectMapper objectMapper;
+    private final IamPolicyEvaluator conditions;
 
     @Inject
-    public AssumeRolePolicyEvaluator(ObjectMapper objectMapper) {
+    public AssumeRolePolicyEvaluator(ObjectMapper objectMapper, IamPolicyEvaluator conditions) {
         this.objectMapper = objectMapper;
+        this.conditions = conditions;
     }
 
     /**
      * Returns true if {@code trustPolicyDocument} allows the caller (identified by
-     * {@code callerArn}, in {@code callerAccount}) to perform {@code sts:AssumeRole}.
+     * {@code callerArn}, in {@code callerAccount}) to perform {@code sts:AssumeRole}, with no
+     * condition context — the shape a call carrying neither an external id nor session tags has.
      *
      * <p>A null/blank/unparseable document or one with no matching {@code Allow} denies.
      */
     public boolean allows(String trustPolicyDocument, String callerArn, String callerAccount) {
+        return allows(trustPolicyDocument, callerArn, callerAccount, ASSUME_ROLE_ACTION, Map.of());
+    }
+
+    /**
+     * Returns true if {@code trustPolicyDocument} allows the caller to perform {@code action} —
+     * {@code sts:AssumeRole}, or {@code sts:TagSession} for a call carrying {@code Tags} — under
+     * the request's condition context.
+     *
+     * <p>The context is what STS puts in front of a trust policy: {@code sts:ExternalId} for the
+     * {@code ExternalId} parameter, and {@code aws:RequestTag/<key>} with {@code aws:TagKeys} for
+     * the tags. A key the request does not carry is absent, so a policy demanding one refuses the
+     * call, which is how a trust policy written with an external id refuses a call without it.
+     */
+    public boolean allows(String trustPolicyDocument, String callerArn, String callerAccount,
+                          String action, Map<String, List<String>> conditionContext) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return false;
         }
@@ -62,58 +82,63 @@ public class AssumeRolePolicyEvaluator {
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode stmt : statements) {
-                switch (evaluateStatement(stmt, callerArn, callerAccount)) {
+                switch (evaluateStatement(stmt, callerArn, callerAccount, action, conditionContext)) {
                     case DENY -> { return false; }
                     case ALLOW -> allow = true;
                     case NO_MATCH -> { }
                 }
             }
         } else if (statements.isObject()) {
-            return evaluateStatement(statements, callerArn, callerAccount) == Match.ALLOW;
+            return evaluateStatement(statements, callerArn, callerAccount, action, conditionContext)
+                    == Match.ALLOW;
         }
         return allow;
     }
 
     private enum Match { ALLOW, DENY, NO_MATCH }
 
-    private Match evaluateStatement(JsonNode stmt, String callerArn, String callerAccount) {
-        if (!actionApplies(stmt)) {
+    private Match evaluateStatement(JsonNode stmt, String callerArn, String callerAccount,
+                                    String action, Map<String, List<String>> conditionContext) {
+        if (!actionApplies(stmt, action)) {
             return Match.NO_MATCH;
         }
         if (!matchesPrincipal(stmt.get("Principal"), callerArn, callerAccount)) {
+            return Match.NO_MATCH;
+        }
+        if (!conditions.conditionsMatch(stmt.get("Condition"), conditionContext)) {
             return Match.NO_MATCH;
         }
         return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
     }
 
     /**
-     * True if the statement's action element applies to {@code sts:AssumeRole}. An {@code Action}
+     * True if the statement's action element applies to {@code action}. An {@code Action}
      * element applies when any of its patterns match; a {@code NotAction} element applies when none
      * of its patterns match (AWS semantics, mirroring {@link IamPolicyEvaluator}'s action handling).
      * A statement with neither key expresses no action constraint and does not apply.
      */
-    private boolean actionApplies(JsonNode stmt) {
-        JsonNode action = stmt.get("Action");
-        if (action != null) {
-            return matchesAssumeRoleAction(action);
+    private boolean actionApplies(JsonNode stmt, String action) {
+        JsonNode actionNode = stmt.get("Action");
+        if (actionNode != null) {
+            return matchesAction(actionNode, action);
         }
         JsonNode notAction = stmt.get("NotAction");
         if (notAction != null) {
-            return !matchesAssumeRoleAction(notAction);
+            return !matchesAction(notAction, action);
         }
         return false;
     }
 
-    private boolean matchesAssumeRoleAction(JsonNode actionNode) {
+    private boolean matchesAction(JsonNode actionNode, String action) {
         if (actionNode == null) {
             return false;
         }
         if (actionNode.isTextual()) {
-            return IamPolicyEvaluator.globMatches(actionNode.asText(), ASSUME_ROLE_ACTION);
+            return IamPolicyEvaluator.globMatches(actionNode.asText(), action);
         }
         if (actionNode.isArray()) {
             for (JsonNode a : actionNode) {
-                if (a.isTextual() && IamPolicyEvaluator.globMatches(a.asText(), ASSUME_ROLE_ACTION)) {
+                if (a.isTextual() && IamPolicyEvaluator.globMatches(a.asText(), action)) {
                     return true;
                 }
             }

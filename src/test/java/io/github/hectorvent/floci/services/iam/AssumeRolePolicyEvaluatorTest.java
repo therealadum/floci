@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AssumeRolePolicyEvaluatorTest {
 
-    private final AssumeRolePolicyEvaluator evaluator = new AssumeRolePolicyEvaluator(new ObjectMapper());
+    private final AssumeRolePolicyEvaluator evaluator = new AssumeRolePolicyEvaluator(new ObjectMapper(), new IamPolicyEvaluator(new ObjectMapper()));
 
     private static final String CALLER_ARN = "arn:aws:iam::111111111111:user/alice";
     private static final String CALLER_ACCOUNT = "111111111111";

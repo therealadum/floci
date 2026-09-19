@@ -24,6 +24,8 @@ import org.jboss.logging.Logger;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -40,6 +42,8 @@ public class StsQueryHandler {
     private static final Logger LOG = Logger.getLogger(StsQueryHandler.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final String STS_AUDIENCE = "sts.amazonaws.com";
+    private static final String ASSUME_ROLE_ACTION = "sts:AssumeRole";
+    private static final String TAG_SESSION_ACTION = "sts:TagSession";
 
     private final IamService iamService;
     private final AccountResolver accountResolver;
@@ -111,7 +115,15 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        Response trustDenied = enforceTrustPolicy(roleArn, roleName, accountId);
+        Map<String, String> requestTags = tagsOf(params);
+        List<String> transitiveTagKeys = transitiveTagKeysOf(params);
+        Response invalidTags = validateSessionTags(requestTags, transitiveTagKeys);
+        if (invalidTags != null) {
+            return invalidTags;
+        }
+
+        Response trustDenied = enforceTrustPolicy(roleArn, roleName, accountId,
+                getParam(params, "ExternalId"), requestTags);
         if (trustDenied != null) {
             return trustDenied;
         }
@@ -125,6 +137,7 @@ public class StsQueryHandler {
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(
                 accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId);
+        registerSessionTags(accessKeyId, requestTags, transitiveTagKeys);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -145,7 +158,8 @@ public class StsQueryHandler {
      * Allowing it instead would mint a session with no role behind it, which every later request
      * then denies anyway.
      */
-    private Response enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
+    private Response enforceTrustPolicy(String roleArn, String roleName, String roleAccountId,
+                                        String externalId, Map<String, String> requestTags) {
         if (!config.services().iam().enforcementEnabled()) {
             return null;
         }
@@ -155,13 +169,111 @@ public class StsQueryHandler {
         String callerArn = iamService.resolveCallerArn(
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
                 .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
-        if (role.isPresent()
-                && trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount)) {
-            return null;
+        Map<String, List<String>> context = trustPolicyContext(externalId, requestTags);
+        if (role.isEmpty()) {
+            return trustDenied(callerArn, roleArn, ASSUME_ROLE_ACTION);
         }
+        String trustPolicy = role.get().getAssumeRolePolicyDocument();
+        if (!trustPolicyEvaluator.allows(trustPolicy, callerArn, callerAccount, ASSUME_ROLE_ACTION, context)) {
+            return trustDenied(callerArn, roleArn, ASSUME_ROLE_ACTION);
+        }
+        // Tagging a session is its own action on AWS: a trust policy that allows sts:AssumeRole
+        // alone refuses a call carrying Tags, which is what keeps a caller from writing the tag
+        // that a tenant-scoped policy then reads.
+        if (!requestTags.isEmpty()
+                && !trustPolicyEvaluator.allows(trustPolicy, callerArn, callerAccount, TAG_SESSION_ACTION, context)) {
+            return trustDenied(callerArn, roleArn, TAG_SESSION_ACTION);
+        }
+        return null;
+    }
+
+    private Response trustDenied(String callerArn, String roleArn, String action) {
         return AwsQueryResponse.error("AccessDenied",
-                "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
+                "User: " + callerArn + " is not authorized to perform: " + action + " on resource: " + roleArn,
                 AwsNamespaces.STS, 403);
+    }
+
+    /**
+     * What STS puts in front of a trust policy for one {@code AssumeRole}: the external id under
+     * {@code sts:ExternalId}, and the request's tags under {@code aws:RequestTag/<key>} with their
+     * keys under the multi-valued {@code aws:TagKeys}. A parameter the request leaves out is left
+     * absent rather than set to an empty value, so a policy that demands it refuses the call.
+     */
+    private static Map<String, List<String>> trustPolicyContext(String externalId,
+                                                                Map<String, String> requestTags) {
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        if (externalId != null && !externalId.isBlank()) {
+            context.put("sts:ExternalId", List.of(externalId));
+        }
+        if (!requestTags.isEmpty()) {
+            requestTags.forEach((key, value) -> context.put("aws:RequestTag/" + key, List.of(value)));
+            context.put("aws:TagKeys", List.copyOf(requestTags.keySet()));
+        }
+        return context;
+    }
+
+    /**
+     * The session's tags: the ones the request passed, plus the transitive tags of the session
+     * that made the call, which carry forward and which the new call cannot overwrite.
+     */
+    private void registerSessionTags(String accessKeyId, Map<String, String> requestTags,
+                                     List<String> transitiveTagKeys) {
+        String auth = headers == null ? null : headers.getHeaderString("Authorization");
+        String callerKey = auth == null ? null : accountResolver.extractAccessKeyId(auth);
+        Map<String, String> carried = callerKey == null
+                ? Map.of() : iamService.transitiveSessionTags(callerKey);
+
+        Map<String, String> tags = new LinkedHashMap<>(requestTags);
+        tags.putAll(carried);
+        List<String> transitive = new ArrayList<>(transitiveTagKeys);
+        carried.keySet().stream().filter(key -> !transitive.contains(key)).forEach(transitive::add);
+        iamService.registerSessionTags(accessKeyId, tags, transitive);
+    }
+
+    /** {@code Tags.member.N.Key} / {@code Tags.member.N.Value}, in the order the request gave them. */
+    private static Map<String, String> tagsOf(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int index = 1; ; index++) {
+            String key = params.getFirst("Tags.member." + index + ".Key");
+            if (key == null) {
+                return tags;
+            }
+            tags.put(key, params.getFirst("Tags.member." + index + ".Value"));
+        }
+    }
+
+    private static List<String> transitiveTagKeysOf(MultivaluedMap<String, String> params) {
+        List<String> keys = new ArrayList<>();
+        for (int index = 1; ; index++) {
+            String key = params.getFirst("TransitiveTagKeys.member." + index);
+            if (key == null) {
+                return keys;
+            }
+            keys.add(key);
+        }
+    }
+
+    /**
+     * AWS's own validation of the two parameters: a tag needs a value, a key appears once, and a
+     * transitive key must be one of the tags the same call passes.
+     */
+    private static Response validateSessionTags(Map<String, String> tags, List<String> transitiveTagKeys) {
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            if (tag.getValue() == null) {
+                return AwsQueryResponse.error("ValidationError",
+                        "1 validation error detected: Value null at 'tags." + tag.getKey()
+                                + ".value' failed to satisfy constraint: Member must not be null",
+                        AwsNamespaces.STS, 400);
+            }
+        }
+        for (String key : transitiveTagKeys) {
+            if (!tags.containsKey(key)) {
+                return AwsQueryResponse.error("InvalidParameterValue",
+                        "The transitive tag key " + key + " is not one of the session tags passed.",
+                        AwsNamespaces.STS, 400);
+            }
+        }
+        return null;
     }
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
